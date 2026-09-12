@@ -133,6 +133,20 @@ def test_max_n_stop_unaffected_by_ceiling():
     assert should_stop(DimensionState(n=6, streak=1, max_answered=2), ceiling=5)
 
 
+def test_max_n_overrides_streak_ceiling_gate():
+    """审查修复：连对≥2 但未触顶时，n≥6 上限不得被连对分支短路。"""
+    assert should_stop(DimensionState(n=6, streak=2, max_answered=3), ceiling=5)
+
+
+def test_recovery_pattern_stops_at_max_n():
+    """恢复型作答（对错对错对对）：无连错、末段连对、未触顶，n 到 6 必须停止。"""
+    s = DimensionState()
+    for result in (1.0, 0.0, 1.0, 0.0, 1.0, 1.0):
+        s = update(s, 3.0, result)
+    assert s.n == 6 and s.streak == 2 and s.max_answered == 3
+    assert should_stop(s, ceiling=4)
+
+
 def test_convergence_stop_unaffected_by_ceiling():
     tiny = (0.01, 0.02, 0.01)
     assert should_stop(DimensionState(n=4, streak=0, recent_deltas=tiny, max_answered=2), ceiling=5)

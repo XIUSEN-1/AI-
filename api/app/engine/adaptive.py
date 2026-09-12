@@ -87,15 +87,16 @@ def update(state: DimensionState, difficulty: float, result: float, slow: bool =
 
 
 def should_stop(state: DimensionState, ceiling: int | None = None) -> bool:
-    """ceiling 为该维度客观题池的最高难度：连对停止须已触达上限（防止强学员被提前掐断）；
-    ceiling=None（缺省）保持 M1 行为。连错、题数上限、收敛停止不受 ceiling 影响。
+    """ceiling 为该维度客观题池的最高难度：连对停止须已触达上限（防止强学员被提前掐断）。
+    连错停止与 n≥6 题数上限先于连对触顶判断，不会被连对分支短路；ceiling=None（缺省）
+    保持 M1 行为。
     """
-    if state.streak >= STOP_STREAK:
-        return ceiling is None or state.max_answered >= ceiling
     if state.streak <= -STOP_STREAK:
         return True
     if state.n >= STOP_MAX_N:
         return True
+    if state.streak >= STOP_STREAK:
+        return ceiling is None or state.max_answered >= ceiling
     converged = len(state.recent_deltas) >= 3 and all(abs(d) < CONVERGENCE for d in state.recent_deltas)
     return converged and state.n >= 4
 
