@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.auth_routes import router as auth_router
 from app.api.report_routes import router as report_router
@@ -22,3 +25,8 @@ app.include_router(report_router)
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "app": "ai-compass"}
+
+
+_DIST = Path(__file__).resolve().parent.parent.parent / "web" / "dist"
+if _DIST.exists():
+    app.mount("/", StaticFiles(directory=_DIST, html=True), name="web")

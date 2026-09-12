@@ -35,11 +35,25 @@ ai-compass/
 ## 开发
 
 ```bash
-# 后端
-cd api && pip install -r requirements.txt && uvicorn app.main:app --reload
+# 后端（api/）
+cd api
+python -m venv .venv && source .venv/Scripts/activate   # Windows Git Bash
+pip install -r requirements.txt
+python -m app.seed          # 导入题库种子（90 题，幂等）
+pytest                      # 运行后端测试（74 个）
+uvicorn app.main:app --reload --port 8000   # 开发模式（后端）
 
-# 前端
-cd web && pnpm install && pnpm dev
+# 前端（web/，Node + pnpm）
+cd web
+pnpm install
+pnpm dev        # Vite 开发服务器（http://localhost:5173）
+pnpm test       # vitest
+pnpm build      # 产出 web/dist
+
+# 单进程模式（生产形态：FastAPI 托管 web/dist）
+# 先执行 pnpm build，再：
+cd api && source .venv/Scripts/activate
+uvicorn app.main:app --port 8000   # 打开 http://localhost:8000，API 与页面同源
 ```
 
 ## 开源使用声明
