@@ -155,35 +155,40 @@ export default function ReportPage() {
                     </span>
                   </summary>
                   <div className="space-y-2 border-t px-3 py-2">
-                    {items.map((a) => (
-                      <div key={`${a.dimension}-${a.seq}`} className="rounded bg-slate-50 p-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <p className="text-sm">第 {a.seq} 题 · {a.stem_head}</p>
-                          {a.is_correct === null ? (
-                            <Badge variant="secondary">得分 {(a.score ?? 0).toFixed(2)}/4</Badge>
-                          ) : (
-                            <Badge variant={a.is_correct ? "default" : "destructive"}>
-                              {a.is_correct ? "答对" : "答错"}
-                            </Badge>
+                    {items.map((a) => {
+                      const skipped = a.rationale === "学员跳过";
+                      return (
+                        <div key={`${a.dimension}-${a.seq}`} className="rounded bg-slate-50 p-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <p className="text-sm">第 {a.seq} 题 · {a.stem_head}</p>
+                            {skipped ? (
+                              <Badge variant="secondary">已跳过</Badge>
+                            ) : a.is_correct === null ? (
+                              <Badge variant="secondary">得分 {(a.score ?? 0).toFixed(2)}/4</Badge>
+                            ) : (
+                              <Badge variant={a.is_correct ? "default" : "destructive"}>
+                                {a.is_correct ? "答对" : "答错"}
+                              </Badge>
+                            )}
+                          </div>
+                          {a.type === "practical" && (a.process_score != null || a.artifact_score != null) && (
+                            <p className="mt-1 text-xs text-slate-500">
+                              过程分 {(a.process_score ?? 0).toFixed(2)} · 产物分 {(a.artifact_score ?? 0).toFixed(2)}
+                            </p>
                           )}
+                          {a.type === "open" || a.type === "practical" ? (
+                            a.rationale && !skipped && (
+                              <p className="mt-1 text-xs leading-relaxed text-slate-500">判题理由：{a.rationale}</p>
+                            )
+                          ) : (
+                            a.explanation && (
+                              <p className="mt-1 text-xs leading-relaxed text-slate-500">解析：{a.explanation}</p>
+                            )
+                          )}
+                          <p className="mt-1 text-xs text-slate-400">作答后能力值 {a.theta_after.toFixed(3)}</p>
                         </div>
-                        {a.type === "practical" && (a.process_score != null || a.artifact_score != null) && (
-                          <p className="mt-1 text-xs text-slate-500">
-                            过程分 {(a.process_score ?? 0).toFixed(2)} · 产物分 {(a.artifact_score ?? 0).toFixed(2)}
-                          </p>
-                        )}
-                        {a.type === "open" || a.type === "practical" ? (
-                          a.rationale && (
-                            <p className="mt-1 text-xs leading-relaxed text-slate-500">判题理由：{a.rationale}</p>
-                          )
-                        ) : (
-                          a.explanation && (
-                            <p className="mt-1 text-xs leading-relaxed text-slate-500">解析：{a.explanation}</p>
-                          )
-                        )}
-                        <p className="mt-1 text-xs text-slate-400">作答后能力值 {a.theta_after.toFixed(3)}</p>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </details>
               );

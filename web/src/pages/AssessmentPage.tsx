@@ -11,7 +11,8 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+import { pollJudging } from "@/lib/judging";
 
 interface Option {
   key: string;
@@ -109,9 +110,14 @@ export default function AssessmentPage() {
   const [taskTick, setTaskTick] = useState(0); // 手动重试拉取任务
   const [artifact, setArtifact] = useState("");
   const [submittingArtifact, setSubmittingArtifact] = useState(false);
+  const [skippingPractical, setSkippingPractical] = useState(false);
+  const [judging, setJudging] = useState<{ step: number; total: number } | null>(null); // 判题进度轮询中
   const questionShownAt = useRef<number>(Date.now());
   const started = useRef(false);
   const dialogStartedFor = useRef<number>(0); // 已 dialog/start 的对话题 id（防重复开场）
+  const pollStopRef = useRef<(() => void) | null>(null); // 判题轮询定时器清理句柄
+
+  useEffect(() => () => pollStopRef.current?.(), []); // 卸载清轮询定时器
 
   useEffect(() => {
     if (started.current) return; // StrictMode 双挂载保护
@@ -211,6 +217,23 @@ export default function AssessmentPage() {
     }
   }
 
+  // 学员主动跳过当前对话题：不判分切下一题/翻阶段（点击即生效，不判分不回灌能力值）
+  async function skipDialogQuestion() {
+    if (!view || dialogBusy) return;
+    setDialogBusy(true);
+    setError("");
+    try {
+      const next = await api<SessionView>(`/api/sessions/${view.session_id}/dialog/skip`, { method: "POST" });
+      setDialog(null);
+      setDialogFullTurns(false);
+      setView(next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "跳过失败，请重试");
+    } finally {
+      setDialogBusy(false);
+    }
+  }
+
   // 满 3 轮后题目已在服务端自动关闭：start 下一道；若对话题全部结束则进入实操
   async function nextDialogQuestion() {
     if (!view || dialogBusy) return;
@@ -258,19 +281,60 @@ export default function AssessmentPage() {
     }
   }
 
+  // 学员主动跳过实操任务：不提交产物直接进入 ready（报告中标注"已跳过"）
+  async function skipPractical() {
+    if (!view || skippingPractical) return;
+    setSkippingPractical(true);
+    setError("");
+    try {
+      await api(`/api/sessions/${view.session_id}/practical/skip`, { method: "POST" });
+      setView({ ...view, stage: "ready", question: null, reason: "" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "跳过失败，请重试");
+    } finally {
+      setSkippingPractical(false);
+    }
+  }
+
+  // 生成报告三态：202 新受理 → 轮询判题进度；200 幂等 → 直接看报告；409 → 已在判题，进同一轮询
   async function finish() {
-    if (!view || finishing) return;
+    if (!view || finishing || judging) return;
     setFinishing(true);
     setError("");
     try {
-      const resp = await api<{ report_id: number }>(`/api/sessions/${view.session_id}/finish`, {
-        method: "POST",
-      });
-      navigate(`/report/${resp.report_id}`);
+      const resp = await api<{ report_id?: number; judging_total?: number }>(
+        `/api/sessions/${view.session_id}/finish`,
+        { method: "POST" },
+      );
+      if (resp.report_id != null) {
+        navigate(`/report/${resp.report_id}`);
+        return;
+      }
+      startJudgingPoll(resp.judging_total ?? 0);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "生成报告失败");
+      if (err instanceof ApiError && err.status === 409) {
+        startJudgingPoll(0); // 上一请求仍在判题：跟随其进度（首轮轮询即得 x/y）
+        return;
+      }
+      setError(err instanceof Error ? err.message : "生成报告失败，请重试");
       setFinishing(false);
     }
+  }
+
+  function startJudgingPoll(total: number) {
+    if (!view) return;
+    pollStopRef.current?.();
+    setJudging({ step: 0, total });
+    pollStopRef.current = pollJudging(view.session_id, {
+      onProgress: (step, t) => setJudging({ step, total: t }),
+      onDone: (reportId) => navigate(`/report/${reportId}`),
+      onError: (message) => {
+        pollStopRef.current = null;
+        setJudging(null);
+        setFinishing(false);
+        setError(message);
+      },
+    });
   }
 
   if (error && !view) return <div className="p-8 text-red-600">{error}</div>;
@@ -410,9 +474,14 @@ export default function AssessmentPage() {
                     进入下一题
                   </Button>
                 ) : (
-                  <Button variant="outline" onClick={finishDialogQuestion} disabled={dialogBusy}>
-                    结束本题
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={finishDialogQuestion} disabled={dialogBusy}>
+                      结束本题
+                    </Button>
+                    <Button variant="ghost" onClick={skipDialogQuestion} disabled={dialogBusy}>
+                      跳过本题
+                    </Button>
+                  </div>
                 )}
               </>
             ) : dialogBusy ? (
@@ -469,13 +538,22 @@ export default function AssessmentPage() {
                   onChange={(e) => setArtifact(e.target.value)}
                   disabled={submittingArtifact}
                 />
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className={`text-xs ${artifactValid || artifactLen === 0 ? "text-slate-500" : "text-red-600"}`}>
                     已输入 {artifactLen} 字（要求 {task.artifact_min}~{task.artifact_max} 字）
                   </span>
-                  <Button onClick={submitArtifact} disabled={!artifactValid || submittingArtifact}>
-                    {submittingArtifact ? "提交中…" : "提交产物"}
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="ghost"
+                      onClick={skipPractical}
+                      disabled={skippingPractical || submittingArtifact}
+                    >
+                      {skippingPractical ? "跳过中…" : "跳过实操任务"}
+                    </Button>
+                    <Button onClick={submitArtifact} disabled={!artifactValid || submittingArtifact}>
+                      {submittingArtifact ? "提交中…" : "提交产物"}
+                    </Button>
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -499,10 +577,21 @@ export default function AssessmentPage() {
         <Card>
           <CardContent className="space-y-3 py-6 text-center">
             <p className="font-medium">全部测评完成！</p>
-            <p className="text-sm text-slate-500">点击下方按钮生成你的能力雷达报告</p>
-            <Button onClick={finish} disabled={finishing}>
-              {finishing ? "生成中…" : "生成报告"}
-            </Button>
+            {judging ? (
+              <>
+                <p className="text-sm text-slate-500">
+                  {judging.total > 0 ? `智能判题中 ${judging.step}/${judging.total}…` : "智能判题中…"}
+                </p>
+                <Progress value={judging.total > 0 ? (judging.step / judging.total) * 100 : 0} />
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-slate-500">点击下方按钮生成你的能力雷达报告</p>
+                <Button onClick={finish} disabled={finishing}>
+                  {finishing ? "生成中…" : "生成报告"}
+                </Button>
+              </>
+            )}
           </CardContent>
         </Card>
       )}
