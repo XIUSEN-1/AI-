@@ -40,7 +40,7 @@ def _id_num(qid: str) -> int:
     return int(qid.split("-")[1][1:])
 
 
-BATCH2_DIMS = ["D1", "D2", "D3", "D4"]  # 批次 2 按任务逐维扩展：Task1 D1+D2 → Task2 +D3+D4 → Task3 +D5+D6
+BATCH2_DIMS = ["D1", "D2", "D3", "D4", "D5", "D6"]  # 批次 2 按任务逐维扩展：Task1 D1+D2 → Task2 +D3+D4 → Task3 +D5+D6
 
 
 def test_bank_batch1_quota():
