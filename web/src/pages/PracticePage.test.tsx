@@ -123,7 +123,7 @@ describe("PracticePage 冒烟", () => {
 
     // 设置页：维度选项来自错题本
     expect(container.textContent).toContain("错题练习");
-    expect(container.textContent).toContain("提问与信息检索 · 2 道错题");
+    expect(container.textContent).toContain("提问与信息检索 · 错题 1 题");
     await clickButton(container, "开始练习");
     await flush();
 
@@ -152,7 +152,7 @@ describe("PracticePage 冒烟", () => {
     await clickButton(container, "再来一卷");
     await flush();
     expect(container.textContent).toContain("开始练习");
-    expect(container.textContent).toContain("提问与信息检索 · 2 道错题");
+    expect(container.textContent).toContain("提问与信息检索 · 错题 1 题");
     cleanup();
   });
 

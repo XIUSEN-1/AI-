@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Line, LineChart, ResponsiveContainer, YAxis } from "recharts";
 
-import ChatPanel from "@/components/ChatPanel";
+import ChatPanel, { type ChatMessage } from "@/components/ChatPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -53,6 +53,21 @@ interface SessionView {
   reason: string;
   progress: Record<string, DimensionProgress>;
   just?: { is_correct: boolean; explanation: string | null; dimension: string; theta: number };
+  messages?: SessionMessageOut[]; // 仅会话完整视图（断线续答恢复）返回
+}
+
+interface SessionMessageOut {
+  channel: string;
+  role: string;
+  content: string;
+  seq: number;
+}
+
+interface ActiveSession {
+  session_id: number;
+  stage: string;
+  progress: Record<string, { n: number }>;
+  started_at: string;
 }
 
 interface DialogStartOut {
@@ -102,18 +117,21 @@ export default function AssessmentPage() {
   const [finishing, setFinishing] = useState(false);
   const [traces, setTraces] = useState<Record<string, { t: number; v: number }[]>>({});
   const [dialog, setDialog] = useState<DialogStartOut | null>(null); // 当前对话题（含开场白）
+  const [dialogHistory, setDialogHistory] = useState<ChatMessage[] | null>(null); // 断线续答回放的对话留痕
   const [dialogBusy, setDialogBusy] = useState(false); // start/切题/结束本题进行中
   const [dialogFullTurns, setDialogFullTurns] = useState(false); // 当前题已满 3 轮，等待进入下一题
   const [dialogStartTick, setDialogStartTick] = useState(0); // 手动重试开场
   const [task, setTask] = useState<PracticalTaskOut | null>(null);
   const [taskLoading, setTaskLoading] = useState(false);
   const [taskTick, setTaskTick] = useState(0); // 手动重试拉取任务
+  const [practicalHistory, setPracticalHistory] = useState<ChatMessage[] | null>(null); // 断线续答回放的协作窗留痕
   const [artifact, setArtifact] = useState("");
   const [submittingArtifact, setSubmittingArtifact] = useState(false);
   const [skippingPractical, setSkippingPractical] = useState(false);
   const [judging, setJudging] = useState<{ step: number; total: number } | null>(null); // 判题进度轮询中
   const questionShownAt = useRef<number>(Date.now());
   const started = useRef(false);
+  const taskStarted = useRef(false); // 已拉取实操任务（防重复拉取，对齐 dialogStartedFor）
   const dialogStartedFor = useRef<number>(0); // 已 dialog/start 的对话题 id（防重复开场）
   const pollStopRef = useRef<(() => void) | null>(null); // 判题轮询定时器清理句柄
 
@@ -122,14 +140,63 @@ export default function AssessmentPage() {
   useEffect(() => {
     if (started.current) return; // StrictMode 双挂载保护
     started.current = true;
-    api<SessionView>("/api/sessions", { method: "POST", body: JSON.stringify({ mode: "full" }) })
-      .then((v) => {
-        setView(v);
-        questionShownAt.current = Date.now();
-        setAnswer(null);
-      })
+    // 断线续答：已有 in_progress 会话则恢复该会话，否则新建
+    api<ActiveSession | null>("/api/sessions/active")
+      .then((a) => (a?.session_id ? resumeSession(a.session_id) : startNew()))
       .catch((err: unknown) => setError(err instanceof Error ? err.message : "无法开始测评"));
   }, []);
+
+  function applyView(v: SessionView) {
+    setView(v);
+    questionShownAt.current = Date.now();
+    setAnswer(null);
+  }
+
+  function startNew(): Promise<void> {
+    return api<SessionView>("/api/sessions", { method: "POST", body: JSON.stringify({ mode: "full" }) }).then(
+      (v) => applyView(v),
+    );
+  }
+
+  async function resumeSession(sessionId: number) {
+    const v = await api<SessionView>(`/api/sessions/${sessionId}`);
+    applyView(v);
+    replayHistory(v);
+  }
+
+  // 对话留痕按考官结束/跳过标记切段（与服务端 DIALOG_CLOSING/DIALOG_SKIPPED 文案一致），
+  // 最后一段即当前未结束对话题的完整气泡历史
+  function currentDialogSegment(messages: SessionMessageOut[]): ChatMessage[] {
+    const CLOSINGS = ["本题作答结束。", "学员跳过本题。"];
+    const dialogMsgs = messages.filter((m) => m.channel === "dialog");
+    let start = 0;
+    dialogMsgs.forEach((m, i) => {
+      if (m.role === "examiner" && CLOSINGS.includes(m.content)) start = i + 1;
+    });
+    return dialogMsgs
+      .slice(start)
+      .filter((m) => m.role === "learner" || m.role === "examiner")
+      .map((m) => ({ role: m.role === "learner" ? "learner" : "counterpart", content: m.content }));
+  }
+
+  function replayHistory(v: SessionView) {
+    const messages = v.messages ?? [];
+    if (v.stage === "dialog" && v.question) {
+      const segment = currentDialogSegment(messages);
+      if (segment.length > 0) {
+        dialogStartedFor.current = v.question.id; // 已有留痕：不再 dialog/start，直接回放
+        setDialog({ question: v.question, opening: segment[0].content });
+        setDialogHistory(segment);
+        if ((v.question.dialog_turns_taken ?? 0) >= DIALOG_MAX_TURNS) setDialogFullTurns(true);
+      }
+      // 无留痕（尚未开场）→ 交给既有 dialog/start effect 正常开场
+    } else if (v.stage === "practical") {
+      const chat = messages
+        .filter((m) => m.channel === "practical" && (m.role === "learner" || m.role === "assistant"))
+        .map((m) => ({ role: m.role === "learner" ? ("learner" as const) : ("counterpart" as const), content: m.content }));
+      if (chat.length > 0) setPracticalHistory(chat);
+    }
+  }
 
   // 进入/切换对话题：先 start 拿考官开场白（turn 前必须先 start）
   useEffect(() => {
@@ -146,15 +213,19 @@ export default function AssessmentPage() {
       .finally(() => setDialogBusy(false));
   }, [view, dialogBusy, dialogStartTick]);
 
-  // 进入实操阶段：拉取任务说明（题面 + 产物字数要求）
+  // 进入实操阶段：拉取任务说明（题面 + 产物字数要求）——ref 防护对齐 dialog effect，防重复拉取
   useEffect(() => {
-    if (!view || view.stage !== "practical" || task || taskLoading) return;
+    if (!view || view.stage !== "practical" || task || taskStarted.current) return;
+    taskStarted.current = true;
     setTaskLoading(true);
     api<PracticalTaskOut>(`/api/sessions/${view.session_id}/practical/task`)
       .then(setTask)
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : "实操任务加载失败，请重试"))
+      .catch((err: unknown) => {
+        taskStarted.current = false; // 失败后允许重试（retryTask 触发本 effect 重跑）
+        setError(err instanceof Error ? err.message : "实操任务加载失败，请重试");
+      })
       .finally(() => setTaskLoading(false));
-  }, [view, task, taskLoading, taskTick]);
+  }, [view, task, taskTick]);
 
   function retryDialogStart() {
     if (!view?.question) return;
@@ -208,6 +279,7 @@ export default function AssessmentPage() {
         method: "POST",
       });
       setDialog(null);
+      setDialogHistory(null);
       setDialogFullTurns(false);
       setView(next);
     } catch (err) {
@@ -225,6 +297,7 @@ export default function AssessmentPage() {
     try {
       const next = await api<SessionView>(`/api/sessions/${view.session_id}/dialog/skip`, { method: "POST" });
       setDialog(null);
+      setDialogHistory(null);
       setDialogFullTurns(false);
       setView(next);
     } catch (err) {
@@ -243,6 +316,7 @@ export default function AssessmentPage() {
       const d = await api<DialogStartOut>(`/api/sessions/${view.session_id}/dialog/start`, { method: "POST" });
       dialogStartedFor.current = d.question.id;
       setDialog(d);
+      setDialogHistory(null); // 新题从开场白重新开始，不沿用上一题回放
       setDialogFullTurns(false);
       setView((v) => (v ? { ...v, question: d.question } : v));
     } catch (err) {
@@ -255,6 +329,7 @@ export default function AssessmentPage() {
         const t = await api<PracticalTaskOut>(`/api/sessions/${view.session_id}/practical/task`);
         setTask(t);
         setDialog(null);
+        setDialogHistory(null);
         setView((v) => (v ? { ...v, stage: "practical", question: null } : v));
       } catch (err2) {
         setError(err2 instanceof Error ? err2.message : "无法进入实操任务");
@@ -458,7 +533,7 @@ export default function AssessmentPage() {
                   key={dialog.question.id}
                   endpoint={`/api/sessions/${view.session_id}/dialog/turn`}
                   counterpartLabel="考官"
-                  initialMessages={[{ role: "counterpart", content: dialog.opening }]}
+                  initialMessages={dialogHistory ?? [{ role: "counterpart", content: dialog.opening }]}
                   initialTurns={dialog.question.dialog_turns_taken ?? 0}
                   maxTurns={DIALOG_MAX_TURNS}
                   inputPlaceholder="结合你的实际经验回答考官的问题（可多行输入）"
@@ -516,8 +591,8 @@ export default function AssessmentPage() {
                 <ChatPanel
                   endpoint={`/api/sessions/${view.session_id}/practical/chat`}
                   counterpartLabel="AI 助手"
-                  initialMessages={[]}
-                  initialTurns={0}
+                  initialMessages={practicalHistory ?? []}
+                  initialTurns={practicalHistory?.filter((m) => m.role === "learner").length ?? 0}
                   maxTurns={PRACTICAL_MAX_TURNS}
                   inputPlaceholder="向 AI 描述需求、追问方案、迭代修正（可多行输入）"
                   streamingNote="AI 回复中…"

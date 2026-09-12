@@ -58,13 +58,13 @@ type AnswerValue = string | string[] | boolean | null;
 
 const AUTO_DIM = "auto"; // RadioGroup 哨兵值：不指定维度，由服务端按错题量取薄弱维度
 
-/** 可选维度与考点标签：错题本按维度聚合（错题数降序）；URL ?dimension=Dx 不在错题维度中时补入。 */
+/** 可选维度与考点标签：错题本按维度聚合（去重题数降序）；URL ?dimension=Dx 不在错题维度中时补入。 */
 function dimOptions(items: WrongItem[] | null, paramDim: string | null) {
   if (items === null) return [] as { dimension: string; name: string; wrong: number; tags: string[] }[];
   const byDim = new Map<string, { dimension: string; name: string; wrong: number; tags: Set<string> }>();
   for (const w of items) {
     const d = byDim.get(w.dimension) ?? { dimension: w.dimension, name: w.dimension_name, wrong: 0, tags: new Set<string>() };
-    d.wrong += w.wrong_count;
+    d.wrong += 1; // 每条记录即一道去重题目（与后端口径一致），维度内计数 = 题数
     for (const t of w.tags) d.tags.add(t);
     byDim.set(w.dimension, d);
   }
@@ -321,7 +321,7 @@ export default function PracticePage() {
                         <RadioGroupItem value={d.dimension} id={`dim-${d.dimension}`} />
                         <Label htmlFor={`dim-${d.dimension}`}>
                           {d.name}
-                          {d.wrong > 0 ? ` · ${d.wrong} 道错题` : ""}
+                          {d.wrong > 0 ? ` · 错题 ${d.wrong} 题` : ""}
                         </Label>
                       </div>
                     ))}
