@@ -80,6 +80,27 @@ def test_question_payload_has_no_answer(client, auth_headers):
     assert "rubric" not in start["question"]
 
 
+def test_question_out_shuffles_options(client, auth_headers):
+    """_question_out 下发前对选项随机洗牌：key 集合与文本不变、不改动题目原文、
+    answer/rubric 不泄漏；多次构建至少出现两种顺序（4 选项 30 次全同序概率约 1e-53）。
+    判分按选项 key 精确/集合匹配，不受顺序影响。"""
+    from app.api import session_routes
+
+    with SessionLocal() as db:
+        choice = db.scalars(select(Question).where(Question.code == "D1-T01")).one()
+        baseline = [(o["key"], o["text"]) for o in choice.options]
+        orders = set()
+        for _ in range(30):
+            out = session_routes._question_out(choice)
+            assert set((o["key"], o["text"]) for o in out["options"]) == set(baseline)
+            assert "answer" not in out and "rubric" not in out
+            orders.add(tuple(o["key"] for o in out["options"]))
+        assert len(orders) >= 2  # 顺序确实随机变化，消除答案位置可猜性
+        assert [(o["key"], o["text"]) for o in choice.options] == baseline  # 原对象未被原地改动
+        open_q = db.scalars(select(Question).where(Question.type == "open")).first()
+        assert session_routes._question_out(open_q)["options"] is None  # 无选项题型不受影响
+
+
 def test_judge_answer_must_be_bool(client, auth_headers):
     """判断题答案传非布尔（如字符串）必须 400，而非被 bool() 强转静默判错。"""
     with SessionLocal() as db:

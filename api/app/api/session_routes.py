@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -55,6 +56,10 @@ def _snapshot(states: dict[str, DimensionState]) -> dict:
 
 
 def _question_out(q: Question) -> dict:
+    options = q.options
+    if options:  # 客观选择题：副本上随机洗牌（key 跟随选项对象，判分按 key 不受顺序影响）
+        options = list(options)
+        random.shuffle(options)
     return {
         "id": q.id,
         "code": q.code,
@@ -63,7 +68,7 @@ def _question_out(q: Question) -> dict:
         "type": q.type,
         "difficulty": q.difficulty,
         "stem": q.stem,
-        "options": q.options,
+        "options": options,
         "est_seconds": q.est_seconds,
         "tags": q.tags,
     }
