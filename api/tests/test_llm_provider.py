@@ -1,6 +1,7 @@
 """LLM 接入层测试：全部 monkeypatch httpx 或注入 Mock，绝不触真实 API。"""
 
 import json as jsonlib
+import os
 
 import pytest
 
@@ -231,3 +232,18 @@ def test_env_file_loaded_without_overriding_existing_env(fresh_settings, monkeyp
     assert s.base_url == "https://env.example"  # env 优先于 .env
     assert s.model_judge == "file-judge"
     assert s.model_chat == "deepseek-flash"  # 两处都没有 → 默认
+
+
+def test_suite_never_reads_real_api_key(monkeypatch, tmp_path):
+    """守护 conftest 的结构性保障：pytest_sessionstart 强制 DEEPSEEK_API_KEY=""（空环境变量仍优先于 .env）。
+    合并回有真实 Key 的主仓后，套件内 get_settings 也拿不到 Key → provider 抛 ProviderUnavailableError，
+    绝无真实 API 调用，报告 advice_source=="template" 断言不翻转。删掉 conftest 那行此测试立即翻红。"""
+    assert os.environ.get("DEEPSEEK_API_KEY") == ""  # conftest 强制的空值必须在位
+    # 模拟主仓 api/.env 带真实 Key：重置单例并指向带 Key 的 .env，验证空 env 变量仍优先
+    monkeypatch.setattr("app.config._settings", None)
+    env_file = tmp_path / "real.env"
+    env_file.write_text("DEEPSEEK_API_KEY=sk-file-key-not-real\n", encoding="utf-8")
+    monkeypatch.setattr("app.config._ENV_PATH", env_file)
+    from app.config import get_settings
+
+    assert get_settings().deepseek_api_key == ""

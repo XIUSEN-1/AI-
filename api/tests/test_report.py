@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
@@ -130,6 +131,16 @@ def test_llm_advice_none_chat_fn_uses_template():
     advice, source = generate.generate_llm_advice(dims, gaps, None)
     assert source == "template"
     assert advice == _template_for(dims, gaps)
+
+
+def test_llm_advice_prompt_shape_bug_surfaces():
+    """dimensions 缺 prompt 所需键（theta/correct/answered）时必须以 KeyError 显形，
+    不得被回退边界吞成模板——模板可用的键与 prompt 所需的键不完全重叠。"""
+    bad = [{"dimension": "D1", "name": "概念认知", "level": 2, "level_name": "入门"}]
+    chat = MockChat([])  # 预设为空：任何意外调用都会在此炸响
+    with pytest.raises(KeyError):
+        generate.generate_llm_advice(bad, ["D1"], chat)
+    assert chat.calls == []  # 形状 bug 在构造 prompt 时即暴露，未发起任何调用
 
 
 def test_finish_report_answers_shape_and_order(client, auth_headers, bank):

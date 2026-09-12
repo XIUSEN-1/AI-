@@ -3,6 +3,7 @@
 COMPASS_DB 绑定到 tmp_path_factory 的基目录（pytest 按运行编号管理、自动清理，
 替代裸 tempfile.mkdtemp 防目录泄漏）。必须在收集导入任何 app 模块之前完成，
 故放在 pytest_sessionstart（全部插件就绪后、收集开始前，只调用一次）。
+同处结构性禁用真实 LLM 调用（见 pytest_sessionstart 内注释）。
 """
 
 import json
@@ -18,6 +19,11 @@ def pytest_sessionstart(session):
     db_dir = session.config._tmp_path_factory.getbasetemp() / "compass-test"
     db_dir.mkdir(parents=True, exist_ok=True)  # sqlite 不会自建中间目录
     os.environ["COMPASS_DB"] = str(db_dir / "test.db")
+    # 为什么强制空 Key：环境变量优先于 api/.env（app.config.pick），空值使 provider 直接抛
+    # ProviderUnavailableError。worktree 无 .env 时多余但无害；合并回主仓（.env 带真实 Key）后，
+    # 这行保证整套测试绝不发起真实 API 调用，报告 advice_source=="template" 断言不翻转。
+    # 守护测试：tests/test_llm_provider.py::test_suite_never_reads_real_api_key。
+    os.environ["DEEPSEEK_API_KEY"] = ""
 
 
 @pytest.fixture(scope="session", autouse=True)
