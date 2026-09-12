@@ -77,9 +77,65 @@ def test_state_serialization_roundtrip():
     assert DimensionState.from_dict(s.to_dict()) == s
 
 
+def test_update_tracks_max_answered():
+    assert DimensionState().max_answered == 0
+    s2 = update(DimensionState(), difficulty=3.0, result=1.0)
+    assert s2.max_answered == 3
+    s3 = update(s2, difficulty=4.0, result=1.0)
+    assert s3.max_answered == 4
+
+
+def test_update_max_answered_keeps_highest():
+    """回退到低难度作答时记录不下降：max_answered 是历史最高。"""
+    s = update(DimensionState(), 4.0, 1.0)
+    s2 = update(s, 2.0, 0.0)
+    assert s2.max_answered == 4
+
+
+def test_serialization_roundtrip_keeps_max_answered():
+    s = update(DimensionState(), 4.0, 1.0)
+    restored = DimensionState.from_dict(s.to_dict())
+    assert restored == s
+    assert restored.max_answered == 4
+
+
+def test_from_dict_defaults_max_answered_zero():
+    """M1 旧快照无 max_answered 字段，反序列化必须缺省 0。"""
+    legacy = DimensionState.from_dict({"theta": 3.4, "n": 2, "streak": 2, "recent_deltas": [0.4, 0.26]})
+    assert legacy.max_answered == 0
+
+
 def test_stop_on_two_streak():
     assert should_stop(DimensionState(n=2, streak=2))
     assert should_stop(DimensionState(n=2, streak=-2))
+
+
+def test_streak_stop_waits_for_ceiling():
+    """连对但尚未触达题池最高难度时不停止，触达后才停止。"""
+    below = DimensionState(n=2, streak=2, max_answered=3)
+    assert not should_stop(below, ceiling=4)
+    reached = DimensionState(n=2, streak=2, max_answered=4)
+    assert should_stop(reached, ceiling=4)
+
+
+def test_ceiling_none_keeps_m1_behavior():
+    """ceiling=None（缺省）时连对停止规则与 M1 完全一致。"""
+    assert should_stop(DimensionState(n=2, streak=2, max_answered=1), ceiling=None)
+    assert should_stop(DimensionState(n=2, streak=2, max_answered=1))
+
+
+def test_wrong_streak_stops_despite_ceiling():
+    """连错停止不受触顶条件影响。"""
+    assert should_stop(DimensionState(n=2, streak=-2, max_answered=1), ceiling=5)
+
+
+def test_max_n_stop_unaffected_by_ceiling():
+    assert should_stop(DimensionState(n=6, streak=1, max_answered=2), ceiling=5)
+
+
+def test_convergence_stop_unaffected_by_ceiling():
+    tiny = (0.01, 0.02, 0.01)
+    assert should_stop(DimensionState(n=4, streak=0, recent_deltas=tiny, max_answered=2), ceiling=5)
 
 
 def test_stop_on_max_n():

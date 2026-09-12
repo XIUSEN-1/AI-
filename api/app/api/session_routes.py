@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session as OrmSession
 
 from app.api.auth_routes import get_db
@@ -67,15 +67,30 @@ def _pick_question(db: OrmSession, dimension: str, state: DimensionState, asked_
     return next(q for q in pool if q.code == code)
 
 
-def _done_dimensions(states: dict[str, DimensionState]) -> set[str]:
-    return {d for d in DIMENSIONS if states[d].n > 0 and adaptive.should_stop(states[d])}
+def _difficulty_ceilings(db: OrmSession) -> dict[str, int | None]:
+    """每维度已发布客观题的最大难度：作为连对停止的难度触顶条件。"""
+    rows = db.execute(
+        select(Question.dimension, func.max(Question.difficulty)).where(
+            Question.type.in_(OBJECTIVE_TYPES),
+            Question.status == "published",
+        ).group_by(Question.dimension)
+    ).all()
+    return {dimension: ceiling for dimension, ceiling in rows}
+
+
+def _done_dimensions(states: dict[str, DimensionState], ceilings: dict[str, int | None]) -> set[str]:
+    return {
+        d for d in DIMENSIONS
+        if states[d].n > 0 and adaptive.should_stop(states[d], ceilings.get(d))
+    }
 
 
 def _session_view(db: OrmSession, session: AssessmentSession) -> dict:
     states = _states(session.theta_snapshot)
     answers = db.scalars(select(SessionAnswer).where(SessionAnswer.session_id == session.id)).all()
     asked = {a.question_code for a in answers}
-    done = _done_dimensions(states)
+    ceilings = _difficulty_ceilings(db)
+    done = _done_dimensions(states, ceilings)
     question = dimension = None
     for d in DIMENSIONS:
         if d in done:

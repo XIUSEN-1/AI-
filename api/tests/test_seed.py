@@ -16,8 +16,8 @@ def items() -> list[dict]:
     return json.loads(FIXTURES.read_text(encoding="utf-8"))["questions"]
 
 
-def test_fixture_bank_has_12_questions(items):
-    assert len(items) == 12
+def test_fixture_bank_has_18_questions(items):
+    assert len(items) == 18
     assert {q["dimension"] for q in items} == {"D1", "D2", "D3", "D4", "D5", "D6"}
 
 
@@ -74,10 +74,10 @@ def test_import_is_idempotent(items):
     with SessionLocal() as db:
         first = import_questions(items, db)
         second = import_questions(items, db)
-    # conftest 的 session 级 seeded_db 已先行导入，故本次 first 可能是全新导入(12)或重复导入(0)
+    # conftest 的 session 级 seeded_db 已先行导入，故本次 first 可能是全新导入(18)或重复导入(0)
     assert first["updated"] == 0
-    assert first["created"] in (0, 12)
+    assert first["created"] in (0, 18)
     assert second == {"created": 0, "updated": 0}
     with SessionLocal() as db:
         codes = db.scalars(select(Question.code)).all()
-        assert len(codes) == 12
+        assert len(codes) == 18

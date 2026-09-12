@@ -31,6 +31,7 @@ class DimensionState:
     n: int = 0
     streak: int = 0  # 连对为正、连错为负
     recent_deltas: tuple[float, ...] = ()  # 最近 3 次更新量
+    max_answered: int = 0  # 该维度已作答题目的最高难度
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -44,6 +45,7 @@ class DimensionState:
             n=int(data.get("n", 0)),
             streak=int(data.get("streak", 0)),
             recent_deltas=tuple(data.get("recent_deltas", [])),
+            max_answered=int(data.get("max_answered", 0)),
         )
 
 
@@ -80,11 +82,17 @@ def update(state: DimensionState, difficulty: float, result: float, slow: bool =
         n=state.n + 1,
         streak=_next_streak(state.streak, result),
         recent_deltas=recent,
+        max_answered=max(state.max_answered, int(difficulty)),
     )
 
 
-def should_stop(state: DimensionState) -> bool:
-    if abs(state.streak) >= STOP_STREAK:
+def should_stop(state: DimensionState, ceiling: int | None = None) -> bool:
+    """ceiling 为该维度客观题池的最高难度：连对停止须已触达上限（防止强学员被提前掐断）；
+    ceiling=None（缺省）保持 M1 行为。连错、题数上限、收敛停止不受 ceiling 影响。
+    """
+    if state.streak >= STOP_STREAK:
+        return ceiling is None or state.max_answered >= ceiling
+    if state.streak <= -STOP_STREAK:
         return True
     if state.n >= STOP_MAX_N:
         return True

@@ -1,7 +1,8 @@
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.models import Question
+from app.models import Question, SessionAnswer
 
 
 def _run_full_flow(client: TestClient, headers: dict, bank: dict, correct: bool = True) -> dict:
@@ -39,6 +40,18 @@ def test_full_correct_flow_finishes(client, auth_headers, bank):
     assert view["question"] is None
     assert all(d["done"] for d in view["progress"].values())
     assert view["progress"]["D1"]["theta"] > 3.0
+
+
+def test_strong_learner_climbs_to_difficulty_ceiling(client, auth_headers, bank):
+    """题池存在 d4 客观题时，连对不应在 d3 提前停止，强学员应被推到难度触顶。"""
+    view = _run_full_flow(client, auth_headers, bank, correct=True)
+    with SessionLocal() as db:
+        difficulties = db.scalars(
+            select(Question.difficulty)
+            .join(SessionAnswer, SessionAnswer.question_id == Question.id)
+            .where(SessionAnswer.session_id == view["session_id"])
+        ).all()
+    assert max(difficulties) >= 4
 
 
 def test_wrong_answers_lower_theta(client, auth_headers, bank):
