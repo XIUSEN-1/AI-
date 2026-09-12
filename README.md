@@ -17,7 +17,7 @@
 
 ## 技术栈
 
-- **前端**：React 18 + TypeScript + Vite + Tailwind CSS + shadcn/ui + Recharts
+- **前端**：React 19 + TypeScript + Vite + Tailwind CSS + shadcn/ui + Recharts
 - **后端**：Python FastAPI + SQLite (WAL) + SQLAlchemy 2.0
 - **大模型**：DeepSeek（OpenAI 兼容接入，provider 可切换），用于对话式测评、LLM 判题与报告生成
 - **部署**：单容器（FastAPI 托管前端静态产物），秒悟 Meoo → 阿里云
@@ -40,7 +40,7 @@ cd api
 python -m venv .venv && source .venv/Scripts/activate   # Windows Git Bash
 pip install -r requirements.txt
 python -m app.seed          # 导入题库种子（90 题，幂等）
-pytest                      # 运行后端测试（74 个）
+pytest                      # 运行后端全部测试
 uvicorn app.main:app --reload --port 8000   # 开发模式（后端）
 
 # 前端（web/，Node + pnpm）
@@ -52,7 +52,7 @@ pnpm build      # 产出 web/dist
 
 # 单进程模式（生产形态：FastAPI 托管 web/dist）
 # 先执行 pnpm build，再：
-cd api && source .venv/Scripts/activate
+cd ../api && source .venv/Scripts/activate
 uvicorn app.main:app --port 8000   # 打开 http://localhost:8000，API 与页面同源
 ```
 

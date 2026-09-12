@@ -18,7 +18,7 @@ def my_reports(user: dict = Depends(current_user), db: OrmSession = Depends(get_
     return [
         {
             "id": r.id,
-            "created_at": r.created_at.isoformat(),
+            "created_at": r.created_at.isoformat() + "Z",
             "total_level": r.total_level,
             "total_level_name": LEVEL_NAMES[r.total_level],
         }
@@ -36,7 +36,7 @@ def get_report(report_id: int, user: dict = Depends(current_user), db: OrmSessio
     return {
         "id": report.id,
         "session_id": report.session_id,
-        "created_at": report.created_at.isoformat(),
+        "created_at": report.created_at.isoformat() + "Z",
         "dimensions": report.dimensions,
         "total_level": report.total_level,
         "total_level_name": LEVEL_NAMES[report.total_level],

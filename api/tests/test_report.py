@@ -20,6 +20,7 @@ def test_finish_returns_report_with_radar(client, auth_headers, bank):
     assert all(0 <= r["value"] <= 100 for r in body["radar"])
     assert 1 <= body["total_level"] <= 5
     assert body["advice"]
+    assert body["created_at"].endswith("Z")
     assert all(d["answered"] >= 2 for d in body["dimensions"])
 
 
@@ -36,6 +37,7 @@ def test_mine_lists_reports(client, auth_headers, bank):
     assert resp.status_code == 200
     assert len(resp.json()) >= 1
     assert "total_level_name" in resp.json()[0]
+    assert resp.json()[0]["created_at"].endswith("Z")
 
 
 def test_report_forbidden_for_others(client, auth_headers, bank):

@@ -1,7 +1,8 @@
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.auth_routes import router as auth_router
@@ -28,5 +29,17 @@ def health() -> dict:
 
 
 _DIST = Path(__file__).resolve().parent.parent.parent / "web" / "dist"
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def spa_fallback(full_path: str):
+    if full_path.startswith("api/") or not _DIST.exists():
+        raise HTTPException(status_code=404)
+    index = _DIST / "index.html"
+    if not index.exists():
+        raise HTTPException(status_code=404)
+    return FileResponse(index)
+
+
 if _DIST.exists():
     app.mount("/", StaticFiles(directory=_DIST, html=True), name="web")
