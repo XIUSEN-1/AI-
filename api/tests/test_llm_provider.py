@@ -3,6 +3,7 @@
 import json as jsonlib
 import os
 
+import httpx
 import pytest
 
 from app.config import Settings
@@ -127,6 +128,33 @@ def test_non_200_raises(monkeypatch):
         chat_completion([], model_role="judge")
 
 
+def test_chat_completion_wraps_network_error(monkeypatch):
+    """连接失败等网络异常必须统一包装为 ProviderUnavailableError 并保留 __cause__，
+    否则调用侧（judge/report/冒烟脚本）拿不到统一的降级入口。"""
+
+    def fake_post(url, **kw):
+        raise httpx.ConnectError("连接失败")
+
+    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
+    use_settings(monkeypatch)
+    with pytest.raises(ProviderUnavailableError, match="网络") as ei:
+        chat_completion([], model_role="judge")
+    assert isinstance(ei.value.__cause__, httpx.ConnectError)
+
+
+def test_chat_stream_wraps_timeout_error(monkeypatch):
+    """流式路径的网络/超时异常同样包装（httpx.TimeoutException 为 HTTPError 子类）。"""
+
+    def fake_post(url, **kw):
+        raise httpx.ReadTimeout("读超时")
+
+    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
+    use_settings(monkeypatch)
+    with pytest.raises(ProviderUnavailableError, match="网络") as ei:
+        list(chat_stream([], model_role="chat"))
+    assert isinstance(ei.value.__cause__, httpx.ReadTimeout)
+
+
 # ---------- chat_stream ----------
 
 
@@ -158,6 +186,25 @@ def test_chat_stream_no_key_raises(monkeypatch):
     use_settings(monkeypatch, deepseek_api_key="")
     with pytest.raises(ProviderUnavailableError):
         list(chat_stream([], model_role="chat"))
+
+
+def test_chat_stream_accepts_data_lines_without_space(monkeypatch):
+    """部分上游/代理回显 `data:{json}`（无空格），解析须与 `data: {json}` 等价。"""
+
+    def fake_post(url, json=None, headers=None, timeout=None, stream=False):
+        lines = [
+            "data:" + jsonlib.dumps({"choices": [{"delta": {"content": "无"}}]}),
+            "data:",  # 空数据行（心跳）应跳过而非 json 解析崩溃
+            "data:" + jsonlib.dumps({"choices": [{"delta": {"content": "格"}}]}),
+            "data:[DONE]",  # 结束标记同样可能无空格
+            "data: " + jsonlib.dumps({"choices": [{"delta": {"content": "不应出现"}}]}),
+        ]
+        return FakeStreamResponse(lines)
+
+    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
+    use_settings(monkeypatch)
+    deltas = list(chat_stream([], model_role="chat"))
+    assert deltas == ["无", "格"]
 
 
 # ---------- Mock ----------
@@ -232,6 +279,19 @@ def test_env_file_loaded_without_overriding_existing_env(fresh_settings, monkeyp
     assert s.base_url == "https://env.example"  # env 优先于 .env
     assert s.model_judge == "file-judge"
     assert s.model_chat == "deepseek-flash"  # 两处都没有 → 默认
+
+
+def test_env_file_with_bom_still_parses_first_key(fresh_settings, monkeypatch):
+    """Windows 记事本等工具保存的 .env 带 UTF-8 BOM：首行键名会被污染成
+    \\ufeffDEEPSEEK_API_KEY 而静默丢 Key，读取须用 utf-8-sig 剥离。"""
+    env_file = fresh_settings / "bom.env"
+    env_file.write_bytes(b"\xef\xbb\xbfDEEPSEEK_API_KEY=bom-key\nDEEPSEEK_MODEL_JUDGE=bom-judge\n")
+    monkeypatch.setattr("app.config._ENV_PATH", env_file)
+    from app.config import get_settings
+
+    s = get_settings()
+    assert s.deepseek_api_key == "bom-key"
+    assert s.model_judge == "bom-judge"
 
 
 def test_suite_never_reads_real_api_key(monkeypatch, tmp_path):

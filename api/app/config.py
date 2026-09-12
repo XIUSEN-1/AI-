@@ -22,7 +22,7 @@ def _load_env_file(path: Path) -> dict[str, str]:
     if not path.exists():
         return {}
     result: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():  # utf-8-sig 剥离 Windows 记事本 BOM
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue

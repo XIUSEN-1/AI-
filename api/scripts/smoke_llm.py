@@ -5,7 +5,7 @@ worktree 无 api/.env，Key 在主仓 .env 时用 --env-file 指过去（或直�
     cd api
     python scripts/smoke_llm.py --env-file C:/Users/tsbf-cjh1/Documents/ai-compass/api/.env
 
-退出码：0 = 判题成功；1 = 判题降级（关键词兜底，LLM 路径未走通）；2 = LLM 不可用（无 Key/上游异常）。
+退出码：0 = 判题成功；1 = 判题降级（关键词兜底，LLM 路径未走通）；2 = LLM/网络不可用（无 Key、连接或超时等网络异常——provider 统一包装为 ProviderUnavailableError）。
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ SAMPLE_SUBMISSION = """1）缺少的关键要素至少有：任务目标（整�
 
 def _load_env_file(path: Path) -> None:
     """把 --env-file 的 KEY=VALUE 注入环境（已存在的环境变量优先，与 config 语义一致）。"""
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():  # 与 config 一致：剥离 BOM
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
