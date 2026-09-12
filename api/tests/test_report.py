@@ -44,12 +44,16 @@ def test_finish_is_idempotent(client, auth_headers, bank):
 
 
 def test_mine_lists_reports(client, auth_headers, bank):
-    _finish_a_session(client, auth_headers, bank)
+    report_id = _finish_a_session(client, auth_headers, bank)
     resp = client.get("/api/reports/mine", headers=auth_headers)
     assert resp.status_code == 200
     assert len(resp.json()) >= 1
     assert "total_level_name" in resp.json()[0]
     assert resp.json()[0]["created_at"].endswith("Z")
+    # 成长趋势字段：avg_percent = 六维 percent 均值（round），与报告详情口径一致
+    detail = client.get(f"/api/reports/{report_id}", headers=auth_headers).json()
+    expected = round(sum(d["percent"] for d in detail["dimensions"]) / len(detail["dimensions"]))
+    assert resp.json()[0]["avg_percent"] == expected
 
 
 def test_report_forbidden_for_others(client, auth_headers, bank):

@@ -21,6 +21,7 @@ def my_reports(user: dict = Depends(current_user), db: OrmSession = Depends(get_
             "created_at": r.created_at.isoformat() + "Z",
             "total_level": r.total_level,
             "total_level_name": LEVEL_NAMES[r.total_level],
+            "avg_percent": round(sum(d["percent"] for d in r.dimensions) / len(r.dimensions)),  # 成长趋势：综合百分制
         }
         for r in rows
     ]
