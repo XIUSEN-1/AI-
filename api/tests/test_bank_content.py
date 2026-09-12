@@ -30,7 +30,7 @@ def test_bank_coverage_per_dimension(dim):
 def test_bank_all_valid_and_unique():
     items = load_seed_files(SEEDS)
     codes = [q["id"] for q in items]
-    assert len(codes) == len(set(codes)) == 207
+    assert len(codes) == len(set(codes)) == 300
     for q in items:
         validate_question(q)
 
@@ -40,11 +40,11 @@ def _id_num(qid: str) -> int:
     return int(qid.split("-")[1][1:])
 
 
-def test_bank_batch1_quota_d1_d3():
-    """批次 1 前半：D1~D3 各 +31（客观 25 + 主观 6），id 续号与难度金字塔精确。"""
+def test_bank_batch1_quota():
+    """批次 1：六维各 +31（客观 25 + 主观 6），id 续号与难度金字塔精确，总 300。"""
     items = load_seed_files(SEEDS)
-    assert len(items) == 207
-    for dim in ["D1", "D2", "D3"]:
+    assert len(items) == 300
+    for dim in ["D1", "D2", "D3", "D4", "D5", "D6"]:
         qs = [q for q in items if q["dimension"] == dim]
         assert len(qs) == 50, f"{dim} 应为 50 题"
         basic = [q for q in qs if q["tier"] == "basic"]
