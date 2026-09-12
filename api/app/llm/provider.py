@@ -85,7 +85,10 @@ def chat_stream(
                     break
                 if not data:  # 空数据行（心跳）跳过
                     continue
-                delta = json.loads(data)["choices"][0]["delta"].get("content")
+                try:
+                    delta = json.loads(data)["choices"][0]["delta"].get("content")
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                    continue  # 坏帧跳过：不让生成器裸抛，调用侧 SSE 不因此 500
                 if delta:
                     yield delta
     except httpx.HTTPError as exc:  # 含建连失败与流中断/超时

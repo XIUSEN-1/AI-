@@ -18,6 +18,9 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 OBJECTIVE_TYPES = ("single", "multi", "judge")
 
+# 对话题结束标记（dialog/finish-question 落库的考官结束语，同时作为切题依据）
+DIALOG_CLOSING = "本题作答结束。"
+
 
 class StartIn(BaseModel):
     mode: str = "full"
@@ -143,6 +146,63 @@ def _dialog_turns_taken(db: OrmSession, session_id: int, question_id: int) -> in
     )
 
 
+def _dialog_closed(db: OrmSession, session_id: int, question: Question) -> bool:
+    """对话题是否已结束：学员发言满 3 轮，或考官已落结束标记（学员提前完成/跳过）。"""
+    if _dialog_turns_taken(db, session_id, question.id) >= 3:
+        return True
+    return (
+        db.scalar(
+            select(SessionMessage.id).where(
+                SessionMessage.session_id == session_id,
+                SessionMessage.question_id == question.id,
+                SessionMessage.channel == "dialog",
+                SessionMessage.role == "examiner",
+                SessionMessage.content == DIALOG_CLOSING,
+            )
+        )
+        is not None
+    )
+
+
+def _next_seq(db: OrmSession, session_id: int) -> int:
+    """SessionMessage.seq：会话内全局递增（跨 channel 保留完整时间线）。"""
+    return (
+        db.scalar(
+            select(func.max(SessionMessage.seq)).where(SessionMessage.session_id == session_id)
+        )
+        or 0
+    ) + 1
+
+
+def _owned_session(db: OrmSession, session_id: int, user: dict) -> AssessmentSession:
+    """对话/实操路由共用的会话装载：归属校验 + 进行中校验。"""
+    session = db.get(AssessmentSession, session_id)
+    if session is None or session.user_id != user["id"]:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if session.status != "in_progress":
+        raise HTTPException(status_code=400, detail="会话已结束")
+    return session
+
+
+def _maybe_advance_stage(db: OrmSession, session: AssessmentSession, plan: dict | None) -> None:
+    """阶段自动翻转（full 模式）：客观全完 → dialog/practical；对话题全部结束 → practical。"""
+    if session.mode != "full":
+        return
+    if session.stage == "objective" and plan is not None and (plan["dialog"] or plan["practical"] is not None):
+        session.stage = "dialog" if plan["dialog"] else "practical"  # quick 模式止于 objective
+        db.add(session)
+        db.commit()
+    elif (
+        session.stage == "dialog"
+        and plan is not None
+        and all(_dialog_closed(db, session.id, q) for q in plan["dialog"])
+        and plan["practical"] is not None
+    ):
+        session.stage = "practical"
+        db.add(session)
+        db.commit()
+
+
 def _session_view(db: OrmSession, session: AssessmentSession) -> dict:
     states = _states(session.theta_snapshot)
     answers = db.scalars(select(SessionAnswer).where(SessionAnswer.session_id == session.id)).all()
@@ -151,21 +211,13 @@ def _session_view(db: OrmSession, session: AssessmentSession) -> dict:
     done = _done_dimensions(states, ceilings)
 
     plan = _stage_plan(db, session)
-    if (
-        session.mode == "full"
-        and session.stage == "objective"
-        and plan is not None
-        and (plan["dialog"] or plan["practical"] is not None)
-    ):
-        # 客观全完自动进入主观阶段（quick 模式止于 objective，保持 M1 行为）
-        session.stage = "dialog" if plan["dialog"] else "practical"
-        db.add(session)
-        db.commit()
+    _maybe_advance_stage(db, session, plan)  # 客观全完→主观；对话题全部结束→实操
 
     question = dimension = None
     reason = ""
-    if session.stage == "dialog" and plan is not None and plan["dialog"]:
-        q = plan["dialog"][0]
+    open_dialog = [q for q in (plan["dialog"] if plan else []) if not _dialog_closed(db, session.id, q)]
+    if session.stage == "dialog" and open_dialog:
+        q = open_dialog[0]
         dimension = q.dimension
         question = _question_out(q) | {"dialog_turns_taken": _dialog_turns_taken(db, session.id, q.id)}
         reason = (
@@ -238,6 +290,8 @@ def submit_answer(
         raise HTTPException(status_code=404, detail="会话不存在")
     if session.status != "in_progress":
         raise HTTPException(status_code=400, detail="会话已结束")
+    if session.stage != "objective":
+        raise HTTPException(status_code=400, detail="当前阶段不支持客观题作答")
     question = db.get(Question, body.question_id)
     if question is None:
         raise HTTPException(status_code=404, detail="题目不存在")

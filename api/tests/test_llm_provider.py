@@ -207,6 +207,27 @@ def test_chat_stream_accepts_data_lines_without_space(monkeypatch):
     assert deltas == ["无", "格"]
 
 
+def test_chat_stream_skips_malformed_frames(monkeypatch):
+    """上游坏帧（非 JSON、缺 choices 键、choices 空数组）跳过而非让生成器裸抛，
+    否则对话/实操 SSE 路由消费 chat_stream 时会 500 中断整场测评。"""
+
+    def fake_post(url, json=None, headers=None, timeout=None, stream=False):
+        lines = [
+            "data: {broken json",  # JSONDecodeError
+            sse_line({"content": "好"}),
+            "data: " + jsonlib.dumps({"no_choices": True}),  # KeyError
+            "data: " + jsonlib.dumps({"choices": []}),  # IndexError
+            "data: 5",  # 非 dict JSON → TypeError
+            sse_line({"content": "帧"}),
+            "data: [DONE]",
+        ]
+        return FakeStreamResponse(lines)
+
+    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
+    use_settings(monkeypatch)
+    assert list(chat_stream([], model_role="chat")) == ["好", "帧"]
+
+
 # ---------- Mock ----------
 
 
