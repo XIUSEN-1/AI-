@@ -39,7 +39,7 @@ ai-compass/
 cd api
 python -m venv .venv && source .venv/Scripts/activate   # Windows Git Bash
 pip install -r requirements.txt
-python -m app.seed          # 导入题库种子（300 题，幂等）
+python -m app.seed          # 导入题库种子（1000 题，幂等）
 pytest                      # 运行后端全部测试
 uvicorn app.main:app --reload --port 8000   # 开发模式（后端）
 
