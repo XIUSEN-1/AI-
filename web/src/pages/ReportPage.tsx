@@ -26,6 +26,9 @@ interface AnswerItem {
   score: number | null;
   explanation: string | null;
   theta_after: number;
+  rationale?: string | null; // 开放题/实操题：判题理由（旧报告可能没有）
+  process_score?: number | null; // 实操题：过程分
+  artifact_score?: number | null; // 实操题：产物分
 }
 
 interface ReportOut {
@@ -133,36 +136,58 @@ export default function ReportPage() {
             <CardTitle className="text-base">逐题回显</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
-            {Object.entries(answerGroups).map(([dim, items]) => (
-              <details key={dim} className="rounded-lg border" open={report.gaps.includes(dim)}>
-                <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium">
-                  {byDim[dim]?.name ?? dim}
-                  <span className="ml-2 text-xs font-normal text-slate-500">
-                    答对 {items.filter((a) => a.is_correct).length}/{items.length}
-                  </span>
-                </summary>
-                <div className="space-y-2 border-t px-3 py-2">
-                  {items.map((a) => (
-                    <div key={`${a.dimension}-${a.seq}`} className="rounded bg-slate-50 p-3">
-                      <div className="flex items-start justify-between gap-2">
-                        <p className="text-sm">第 {a.seq} 题 · {a.stem_head}</p>
-                        {a.is_correct === null ? (
-                          <Badge variant="secondary">得分 {a.score ?? "-"}/4</Badge>
-                        ) : (
-                          <Badge variant={a.is_correct ? "default" : "destructive"}>
-                            {a.is_correct ? "答对" : "答错"}
-                          </Badge>
+            {Object.entries(answerGroups).map(([dim, items]) => {
+              const objective = items.filter((a) => a.is_correct !== null);
+              const open = items.filter((a) => a.is_correct === null); // 开放题/实操题按得分制
+              const countParts: string[] = [];
+              if (objective.length > 0) {
+                countParts.push(`客观答对 ${objective.filter((a) => a.is_correct).length}/${objective.length}`);
+              }
+              if (open.length > 0) {
+                countParts.push(`开放题得分 ${open.reduce((s, a) => s + (a.score ?? 0), 0).toFixed(2)}/${open.length * 4}`);
+              }
+              return (
+                <details key={dim} className="rounded-lg border" open={report.gaps.includes(dim)}>
+                  <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium">
+                    {byDim[dim]?.name ?? dim}
+                    <span className="ml-2 text-xs font-normal text-slate-500">
+                      {countParts.join(" · ") || `${items.length} 题`}
+                    </span>
+                  </summary>
+                  <div className="space-y-2 border-t px-3 py-2">
+                    {items.map((a) => (
+                      <div key={`${a.dimension}-${a.seq}`} className="rounded bg-slate-50 p-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="text-sm">第 {a.seq} 题 · {a.stem_head}</p>
+                          {a.is_correct === null ? (
+                            <Badge variant="secondary">得分 {(a.score ?? 0).toFixed(2)}/4</Badge>
+                          ) : (
+                            <Badge variant={a.is_correct ? "default" : "destructive"}>
+                              {a.is_correct ? "答对" : "答错"}
+                            </Badge>
+                          )}
+                        </div>
+                        {a.type === "practical" && (a.process_score != null || a.artifact_score != null) && (
+                          <p className="mt-1 text-xs text-slate-500">
+                            过程分 {(a.process_score ?? 0).toFixed(2)} · 产物分 {(a.artifact_score ?? 0).toFixed(2)}
+                          </p>
                         )}
+                        {a.type === "open" || a.type === "practical" ? (
+                          a.rationale && (
+                            <p className="mt-1 text-xs leading-relaxed text-slate-500">判题理由：{a.rationale}</p>
+                          )
+                        ) : (
+                          a.explanation && (
+                            <p className="mt-1 text-xs leading-relaxed text-slate-500">解析：{a.explanation}</p>
+                          )
+                        )}
+                        <p className="mt-1 text-xs text-slate-400">作答后能力值 {a.theta_after.toFixed(3)}</p>
                       </div>
-                      {a.explanation && (
-                        <p className="mt-1 text-xs leading-relaxed text-slate-500">解析：{a.explanation}</p>
-                      )}
-                      <p className="mt-1 text-xs text-slate-400">作答后能力值 {a.theta_after.toFixed(3)}</p>
-                    </div>
-                  ))}
-                </div>
-              </details>
-            ))}
+                    ))}
+                  </div>
+                </details>
+              );
+            })}
           </CardContent>
         </Card>
       )}
