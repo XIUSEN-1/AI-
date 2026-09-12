@@ -8,11 +8,27 @@ COMPASS_DB 绑定到 tmp_path_factory 的基目录（pytest 按运行编号管�
 
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "test_bank.json"
+
+
+def finish_and_wait(client, headers: dict, session_id: int, timeout: float = 15.0) -> dict:
+    """POST finish（异步判题 202）并轮询 status 至 finished，返回 finish 响应并入 report_id。
+    轮询到 finished 时全部 LLM 调用已结束，monkeypatch 拆卸不会再与后台线程竞态。"""
+    resp = client.post(f"/api/sessions/{session_id}/finish", headers=headers)
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status = client.get(f"/api/sessions/{session_id}/status", headers=headers).json()
+        if status["status"] == "finished":
+            return body | {"report_id": status["report_id"]}
+        time.sleep(0.02)
+    raise AssertionError(f"finish 判题轮询超时（{timeout}s），session={session_id}")
 
 
 def pytest_sessionstart(session):

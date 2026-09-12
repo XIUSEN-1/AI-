@@ -10,14 +10,13 @@ from app.llm.provider import ProviderUnavailableError
 from app.models import AssessmentSession
 from app.report import generate
 from app.report.generate import ADVICE_HIGH, ADVICE_LOW, build_report
+from conftest import finish_and_wait
 from tests.test_session_flow import _run_full_flow
 
 
 def _finish_a_session(client: TestClient, headers: dict, bank: dict) -> int:
     view = _run_full_flow(client, headers, bank, correct=True)
-    resp = client.post(f"/api/sessions/{view['session_id']}/finish", headers=headers)
-    assert resp.status_code == 200
-    return resp.json()["report_id"]
+    return finish_and_wait(client, headers, view["session_id"])["report_id"]
 
 
 def test_finish_returns_report_with_radar(client, auth_headers, bank):
@@ -36,9 +35,10 @@ def test_finish_returns_report_with_radar(client, auth_headers, bank):
 
 def test_finish_is_idempotent(client, auth_headers, bank):
     view = _run_full_flow(client, auth_headers, bank, correct=True)
-    first = client.post(f"/api/sessions/{view['session_id']}/finish", headers=auth_headers).json()
-    second = client.post(f"/api/sessions/{view['session_id']}/finish", headers=auth_headers).json()
-    assert first["report_id"] == second["report_id"]
+    first = finish_and_wait(client, auth_headers, view["session_id"])
+    second = client.post(f"/api/sessions/{view['session_id']}/finish", headers=auth_headers)
+    assert second.status_code == 200  # 已完成会话幂等早返回（不再走异步判题）
+    assert first["report_id"] == second.json()["report_id"]
 
 
 def test_mine_lists_reports(client, auth_headers, bank):
@@ -187,7 +187,7 @@ def test_finish_endpoint_wires_provider_chat_fn(client, auth_headers, bank, monk
 
     monkeypatch.setattr(session_routes, "chat_completion", fake_chat_completion)
     view = _run_full_flow(client, auth_headers, bank, correct=True)
-    resp = client.post(f"/api/sessions/{view['session_id']}/finish", headers=auth_headers)
-    body = client.get(f"/api/reports/{resp.json()['report_id']}", headers=auth_headers).json()
+    report_id = finish_and_wait(client, auth_headers, view["session_id"])["report_id"]
+    body = client.get(f"/api/reports/{report_id}", headers=auth_headers).json()
     assert body["advice_source"] == "llm"
     assert body["advice"] == ["端点级 LLM 建议"]

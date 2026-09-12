@@ -2,8 +2,10 @@
 
 裁定口径：跳过=不判分、不回灌 θ、SessionAnswer score=None、报告 rationale 标注"学员跳过"，
 不作负向评价（区别于"学员未作答"记 0 分）。对话跳过复用闭题/切题语义；实操跳过直接置 ready。
+异步管线下的全跳回归（真实后台线程）见 tests/test_async_judging.py。
 """
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -11,8 +13,15 @@ from app.api.session_routes import DIALOG_SKIPPED, PRACTICAL_SKIPPED
 from app.db import SessionLocal
 from app.llm.mock import MockChat
 from app.models import AssessmentSession, Report, SessionAnswer, SessionMessage
+from conftest import finish_and_wait
 from test_finish_judging import ARTIFACT, _ADVICE, _add_messages, _good, _process_json
 from test_stage_machine import _run_objective
+
+
+@pytest.fixture(autouse=True)
+def _inline_judging(monkeypatch):
+    """本模块断言判题调用次数与顺序（MockChat 按序号喂响应）：内联单 worker 执行。"""
+    monkeypatch.setattr("app.api.session_routes._ASYNC_JUDGING", False)
 
 
 def _messages(sid: int) -> list[SessionMessage]:
@@ -39,12 +48,6 @@ def _report_body(client: TestClient, headers: dict, sid: int) -> dict:
     with SessionLocal() as db:
         report_id = db.scalar(select(Report).where(Report.session_id == sid)).id
     return client.get(f"/api/reports/{report_id}", headers=headers).json()
-
-
-def _finish_ok(client: TestClient, headers: dict, sid: int) -> dict:
-    resp = client.post(f"/api/sessions/{sid}/finish", headers=headers)
-    assert resp.status_code == 200
-    return resp.json()
 
 
 def _skip_all_dialog(client: TestClient, headers: dict, sid: int) -> dict:
@@ -112,7 +115,7 @@ def test_all_skipped_finish_keeps_objective_theta(monkeypatch, client, auth_head
     chat = MockChat([_ADVICE])  # 跳过题零判题调用：finish 仅报告建议一次 LLM 调用
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
 
-    body = _finish_ok(client, auth_headers, sid)
+    body = finish_and_wait(client, auth_headers, sid)
     assert len(chat.calls) == 1
 
     after = _snapshot(sid)
@@ -152,7 +155,7 @@ def test_mixed_skip_and_normal_answers(monkeypatch, client, auth_headers, bank):
     chat = MockChat([_good(3), _good(3), _good(4), _good(4), _process_json(), _ADVICE])
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
 
-    _finish_ok(client, auth_headers, sid)
+    finish_and_wait(client, auth_headers, sid)
     assert len(chat.calls) == 6
 
     answers = _answers(sid)
@@ -189,7 +192,7 @@ def test_skip_marked_but_answered_still_judged(monkeypatch, client, auth_headers
 
     chat = MockChat([_good(2), _good(2), _ADVICE])  # 仅 D3 正常判分 + 建议
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
-    _finish_ok(client, auth_headers, sid)
+    finish_and_wait(client, auth_headers, sid)
     assert len(chat.calls) == 3
 
     answers = _answers(sid)

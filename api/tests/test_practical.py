@@ -14,6 +14,7 @@ from app.db import SessionLocal
 from app.llm.mock import MockStream
 from app.llm.provider import ProviderUnavailableError
 from app.models import AssessmentSession, SessionMessage
+from conftest import finish_and_wait
 from test_stage_machine import _run_objective
 
 ARTIFACT = "最终周计划：" + "本周目标是完成接口联调，分工与里程碑如下。" * 10  # 约 250 字
@@ -168,8 +169,8 @@ def test_practical_submit_marks_ready_and_finishes(client, auth_headers, bank):
     assert submits[0].question_id == q["id"]
     with SessionLocal() as db:
         assert db.get(AssessmentSession, sid).stage == "ready"
-    finish = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)  # ready 放行生成报告
-    assert finish.status_code == 200 and finish.json()["report_id"]
+    finish = finish_and_wait(client, auth_headers, sid)  # ready 放行 → 202 异步判题 → 报告
+    assert finish["report_id"]
 
 
 def test_practical_submit_validates_artifact_length(client, auth_headers, bank):

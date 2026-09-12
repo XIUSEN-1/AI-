@@ -62,6 +62,8 @@ class AssessmentSession(Base):
     # 四阶段：客观 → 对话式 → 实操；ready 为实操已提交（T4）、finish 放行的前置态；quick 止于 objective
     stage: Mapped[str] = mapped_column(String(12), default="objective")  # objective | dialog | practical | ready
     theta_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    judging_step: Mapped[int] = mapped_column(Integer, default=0)  # 异步判题进度：已完成题数（前端轮询 x/y）
+    judging_total: Mapped[int] = mapped_column(Integer, default=0)  # 异步判题总数（主观题数）
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

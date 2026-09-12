@@ -11,6 +11,7 @@ from app.api.session_routes import _session_view, _stage_plan
 from app.db import SessionLocal
 from app.engine.adaptive import DIMENSIONS, DimensionState
 from app.models import AssessmentSession, Question, SessionMessage
+from conftest import finish_and_wait
 
 
 def _snapshot(thetas: dict[str, float]) -> dict:
@@ -118,9 +119,8 @@ def test_full_finish_rejected_until_ready(client, auth_headers, bank):
         session = db.get(AssessmentSession, view["session_id"])
         session.stage = "ready"
         db.commit()
-    resp = client.post(f"/api/sessions/{view['session_id']}/finish", headers=auth_headers)
-    assert resp.status_code == 200
-    assert resp.json()["report_id"]
+    body = finish_and_wait(client, auth_headers, view["session_id"])
+    assert body["report_id"]
 
 
 def test_quick_mode_stays_objective_and_finishes(client, auth_headers, bank):
@@ -128,7 +128,7 @@ def test_quick_mode_stays_objective_and_finishes(client, auth_headers, bank):
     assert view["stage"] == "objective"  # quick 止于客观（M1 行为）
     assert view["question"] is None
     resp = client.post(f"/api/sessions/{view['session_id']}/finish", headers=auth_headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 202  # 异步判题受理（quick 无主观题，判题即刻完成）
 
 
 def test_practical_stage_view_returns_practical_summary(client, auth_headers, bank):
@@ -170,7 +170,8 @@ def test_dialog_view_counts_learner_turns(client, auth_headers, bank):
 
 
 def test_migrate_session_columns_adds_stage(tmp_path, monkeypatch):
-    """M2b 前的旧库（无 stage 列）经 init_db 的幂等 ALTER 补列，存量会话默认 objective。
+    """M2b 前的旧库（无 stage 列）经 init_db 的幂等 ALTER 补列，存量会话默认 objective；
+    M2b-hotfix 前的旧库同样补齐异步判题进度列（judging_step/judging_total 默认 0）。
     全新测试库由 create_all 建表，此 ALTER 路径只有本测试覆盖。"""
     import sqlite3
 
@@ -194,8 +195,11 @@ def test_migrate_session_columns_adds_stage(tmp_path, monkeypatch):
         db_module._migrate_session_columns()
         db_module._migrate_session_columns()  # 幂等：重复执行不报错
         cols = {c["name"] for c in inspect(test_engine).get_columns("assessment_sessions")}
-        assert "stage" in cols
+        assert {"stage", "judging_step", "judging_total"} <= cols
         with test_engine.connect() as c:
-            assert c.execute(text("SELECT stage FROM assessment_sessions WHERE id=1")).scalar() == "objective"
+            row = c.execute(
+                text("SELECT stage, judging_step, judging_total FROM assessment_sessions WHERE id=1")
+            ).one()
+            assert row == ("objective", 0, 0)
     finally:
         test_engine.dispose()

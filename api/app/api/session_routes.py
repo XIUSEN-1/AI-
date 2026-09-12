@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session as OrmSession
 
 from app.api.auth_routes import get_db
 from app.auth import current_user
+from app.db import SessionLocal
 from app.engine import adaptive
 from app.engine.adaptive import DIMENSIONS, DIMENSION_NAMES, DimensionState
 from app.engine.grading import grade_objective, result_from_correct
@@ -16,6 +21,8 @@ from app.judge.pipeline import enqueue_review, judge_answer, update_open_result
 from app.llm.provider import ProviderUnavailableError, chat_completion
 from app.models import AssessmentSession, Question, Report, SessionAnswer, SessionMessage, utcnow
 from app.report.generate import build_report
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -445,25 +452,20 @@ def _review_reason(kind: str, result) -> str | None:
     return "；".join(reasons) or None
 
 
-def _judge_subjective(db: OrmSession, session: AssessmentSession, chat_fn) -> dict[str, dict]:
-    """full 会话 ready 态统一判题：两道对话题整卷判分（learner 消息拼接为 submission）、
-    实操双通道（过程量表均值×0.6 + 产物 rubric 分×0.4），逐题 update_open_result 回灌 θ
-    （对话题→所属维度、实操→D5），degraded/needs_review 结果入复核队列。
-    返回 question_code → 报告回显补充信息（rationale、实操双通道分项）。
-    学员零有效发言的题不判分、不回灌 θ：有跳过标记记 score=None 并注明"学员跳过"，
-    否则 score 记 0 并注明未作答。"""
+def _judging_tasks(db: OrmSession, session: AssessmentSession) -> list[dict]:
+    """判题任务快照（纯数据）：判题材料在此一次读齐，后台线程不再依赖请求级 DB 会话。"""
     plan = _stage_plan(db, session)
     if plan is None:
-        return {}
+        return []
     asked = set(
         db.scalars(
             select(SessionAnswer.question_code).where(SessionAnswer.session_id == session.id)
         )
     )
-    states = _states(session.theta_snapshot)
-    judged: dict[str, dict] = {}
-    pending = [q for q in (*plan["dialog"], plan["practical"]) if q is not None and q.code not in asked]
-    for q in pending:
+    tasks = []
+    for q in (*plan["dialog"], plan["practical"]):
+        if q is None or q.code in asked:
+            continue
         channel = "dialog" if q.type == "open" else "practical"
         prompts = _messages_contents(db, session.id, q.id, channel, "learner")
         artifact_contents = (
@@ -471,106 +473,179 @@ def _judge_subjective(db: OrmSession, session: AssessmentSession, chat_fn) -> di
         )
         artifact = artifact_contents[-1] if artifact_contents else None
         submission = artifact if artifact is not None else "\n".join(prompts)
-        seq = (
-            db.scalar(
-                select(func.max(SessionAnswer.seq)).where(SessionAnswer.session_id == session.id)
-            )
-            or 0
-        ) + 1
-        if _skip_marked(db, session.id, q.id, channel) and (
-            not prompts if q.type == "open" else artifact is None
-        ):
-            # 学员主动跳过（无有效发言/产物）：不判分、不回灌 θ、不作负向评价
-            db.add(
-                SessionAnswer(
-                    session_id=session.id,
-                    question_id=q.id,
-                    question_code=q.code,
-                    dimension=q.dimension,
-                    answer="",
-                    is_correct=None,
-                    score=None,
-                    theta_after=states[q.dimension].theta,
-                    seq=seq,
-                )
-            )
-            db.flush()  # 跳过行同样即时落库：后续题的 max(seq) 查询才能看到，避免重号
-            judged[q.code] = {"rationale": SKIPPED}
-            continue
-        if not submission:
-            db.add(
-                SessionAnswer(
-                    session_id=session.id,
-                    question_id=q.id,
-                    question_code=q.code,
-                    dimension=q.dimension,
-                    answer="",
-                    is_correct=None,
-                    score=0,
-                    theta_after=states[q.dimension].theta,
-                    seq=seq,
-                )
-            )
-            db.flush()  # 未作答行同样即时落库：后续题的 max(seq) 查询才能看到，避免重号
-            judged[q.code] = {"rationale": UNANSWERED}
-            continue
-
-        if q.type == "open":
-            result = judge_answer(_judge_question_dict(q), submission, chat_fn, learner_prompts=prompts)
-            score = float(result.score)
-            rationale = result.rationale
-            judge_raw = result.model_dump()
-            reason = _review_reason("对话题", result)
-            echo = {"rationale": rationale}
-        else:
-            artifact_result = judge_answer(_judge_question_dict(q), submission, chat_fn)
-            process = _judge_process_score(chat_fn, prompts) if prompts else None
-            process_degraded = False
-            notes = []
-            if process is None:  # 无过程材料或量表判分失败 → 过程分按产物分折算
-                process = float(artifact_result.score)
-                if prompts:
-                    process_degraded = True
-                    notes.append("过程判分不可用，过程分按产物分折算（降级）")
-                else:
-                    notes.append("协作窗无学员发言，过程分按产物分折算")
-            score = round(process * 0.6 + artifact_result.score * 0.4, 2)
-            rationale = "；".join([*notes, artifact_result.rationale])
-            judge_raw = {
-                "type": "practical",
-                "artifact": artifact_result.model_dump(),
-                "process": {"score": process, "degraded": process_degraded},
-                "score": score,
+        tasks.append(
+            {
+                "question": _judge_question_dict(q)
+                | {"id": q.id, "dimension": q.dimension, "difficulty": q.difficulty, "type": q.type},
+                "prompts": prompts,
+                "submission": submission,
+                "skipped": _skip_marked(db, session.id, q.id, channel)
+                and (not prompts if q.type == "open" else artifact is None),
             }
-            reason = _review_reason("实操产物", artifact_result)
-            if process_degraded:
-                reason = "；".join(filter(None, [reason, "实操过程判分降级（按产物分折算）"]))
-            echo = {
-                "rationale": rationale,
-                "process_score": process,
-                "artifact_score": artifact_result.score,
-            }
-
-        states[q.dimension] = update_open_result(states[q.dimension], q.difficulty, score)
-        answer = SessionAnswer(
-            session_id=session.id,
-            question_id=q.id,
-            question_code=q.code,
-            dimension=q.dimension,
-            answer=submission,
-            is_correct=None,
-            score=score,
-            theta_after=states[q.dimension].theta,
-            seq=seq,
         )
-        db.add(answer)
-        db.flush()
-        if reason is not None:
-            enqueue_review(db, q.code, session.id, answer.id, judge_raw, reason)
-        judged[q.code] = echo
-    db.flush()  # 未作答行不经 enqueue_review 的 commit，须显式落库供报告回显查询
-    session.theta_snapshot = _snapshot(states)
-    return judged
+    return tasks
+
+
+def _provider_chat(messages: list[dict], **kwargs) -> str:
+    # 无 Key/上游异常时返回空串：judge_answer 解析失败走内置关键词降级，报告建议走模板回退
+    try:
+        return chat_completion(messages, **kwargs)  # model_role 等由调用方传入
+    except ProviderUnavailableError:
+        return ""
+
+
+def _judge_task(task: dict) -> dict:
+    """单题判题（线程池调用）：只做 LLM 调用与结果组装，不碰 DB。
+    跳过/未作答短路（零 LLM 调用）；对话题整卷判分；实操双通道（产物 rubric + 过程量表）。"""
+    q = task["question"]
+    if task["skipped"]:
+        return {"code": q["code"], "skipped": True}
+    if not task["submission"]:
+        return {"code": q["code"], "unanswered": True}
+    if q["type"] == "open":
+        result = judge_answer(q, task["submission"], _provider_chat, learner_prompts=task["prompts"])
+        return {
+            "code": q["code"],
+            "score": float(result.score),
+            "judge_raw": result.model_dump(),
+            "reason": _review_reason("对话题", result),
+            "echo": {"rationale": result.rationale},
+        }
+    artifact_result = judge_answer(q, task["submission"], _provider_chat)
+    process = _judge_process_score(_provider_chat, task["prompts"]) if task["prompts"] else None
+    process_degraded = False
+    notes = []
+    if process is None:  # 无过程材料或量表判分失败 → 过程分按产物分折算
+        process = float(artifact_result.score)
+        if task["prompts"]:
+            process_degraded = True
+            notes.append("过程判分不可用，过程分按产物分折算（降级）")
+        else:
+            notes.append("协作窗无学员发言，过程分按产物分折算")
+    score = round(process * 0.6 + artifact_result.score * 0.4, 2)
+    rationale = "；".join([*notes, artifact_result.rationale])
+    judge_raw = {
+        "type": "practical",
+        "artifact": artifact_result.model_dump(),
+        "process": {"score": process, "degraded": process_degraded},
+        "score": score,
+    }
+    reason = _review_reason("实操产物", artifact_result)
+    if process_degraded:
+        reason = "；".join(filter(None, [reason, "实操过程判分降级（按产物分折算）"]))
+    return {
+        "code": q["code"],
+        "score": score,
+        "judge_raw": judge_raw,
+        "reason": reason,
+        "echo": {
+            "rationale": rationale,
+            "process_score": process,
+            "artifact_score": artifact_result.score,
+        },
+    }
+
+
+def _bump_judging_step(session_id: int) -> None:
+    """进度计数：独立短连接递增 judging_step（前端轮询 status 拿 x/y 进度）。"""
+    with SessionLocal() as db:
+        session = db.get(AssessmentSession, session_id)
+        if session is not None and session.status == "judging":
+            session.judging_step += 1
+            db.commit()
+
+
+def _write_judged(session_id: int, tasks: list[dict], results: dict[str, dict]) -> None:
+    """判题结果统一落库（判完后顺序执行，新开 DB 会话，避免 SQLite 跨线程写锁）：
+    θ 回灌、SessionAnswer、复核队列、报告与 status=finished。"""
+    with SessionLocal() as db:
+        session = db.get(AssessmentSession, session_id)
+        states = _states(session.theta_snapshot)
+        judged: dict[str, dict] = {}
+        for task in tasks:
+            q = task["question"]
+            res = results[q["code"]]
+            seq = (
+                db.scalar(
+                    select(func.max(SessionAnswer.seq)).where(SessionAnswer.session_id == session_id)
+                )
+                or 0
+            ) + 1
+            if res.get("skipped") or res.get("unanswered"):
+                # 跳过：score=None 注明"学员跳过"；未作答：score 记 0。均不判分不回灌 θ
+                skipped = res.get("skipped")
+                db.add(
+                    SessionAnswer(
+                        session_id=session_id,
+                        question_id=q["id"],
+                        question_code=q["code"],
+                        dimension=q["dimension"],
+                        answer="",
+                        is_correct=None,
+                        score=None if skipped else 0,
+                        theta_after=states[q["dimension"]].theta,
+                        seq=seq,
+                    )
+                )
+                db.flush()  # 即时落库：后续题的 max(seq) 查询才能看到，避免重号
+                judged[q["code"]] = {"rationale": SKIPPED if skipped else UNANSWERED}
+                continue
+            states[q["dimension"]] = update_open_result(states[q["dimension"]], q["difficulty"], res["score"])
+            answer = SessionAnswer(
+                session_id=session_id,
+                question_id=q["id"],
+                question_code=q["code"],
+                dimension=q["dimension"],
+                answer=task["submission"],
+                is_correct=None,
+                score=res["score"],
+                theta_after=states[q["dimension"]].theta,
+                seq=seq,
+            )
+            db.add(answer)
+            db.flush()
+            if res["reason"] is not None:
+                enqueue_review(db, q["code"], session_id, answer.id, res["judge_raw"], res["reason"])
+            judged[q["code"]] = res["echo"]
+        session.theta_snapshot = _snapshot(states)
+        report = build_report(db, session, chat_fn=_provider_chat, judged=judged)
+        session.status = "finished"
+        session.finished_at = utcnow()
+        db.add(report)
+        db.commit()
+
+
+def _judge_all_parallel(session_id: int, tasks: list[dict], workers: int = 4) -> None:
+    """后台判题主流程：并行 LLM 调用（结果内存收集）→ 判完统一写库。
+    任一题非降级链异常 → 线程级回滚：status 回 in_progress、step 归零（可重试）。"""
+    results: dict[str, dict] = {}
+    fatal: BaseException | None = None
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_judge_task, t): t["question"]["code"] for t in tasks}
+            for future in as_completed(futures):
+                try:
+                    results[futures[future]] = future.result()
+                except BaseException as exc:  # noqa: BLE001 —— 首个致命异常留待循环外统一回滚
+                    if fatal is None:
+                        fatal = exc
+                    continue
+                _bump_judging_step(session_id)
+        if fatal is not None:
+            raise fatal
+        _write_judged(session_id, tasks, results)
+    except BaseException:
+        logger.exception("后台判题异常，会话 %s 回滚为 in_progress", session_id)
+        with SessionLocal() as db:
+            session = db.get(AssessmentSession, session_id)
+            if session is not None and session.status == "judging":
+                session.status = "in_progress"
+                session.judging_step = 0
+                db.commit()
+
+
+# 判题执行模式：生产为后台线程并行判题；测试注入 False 时请求内单 worker 顺序执行（调用顺序确定）
+_ASYNC_JUDGING = True
 
 
 @router.post("/{session_id}/finish")
@@ -588,31 +663,36 @@ def finish_session(session_id: int, user: dict = Depends(current_user), db: OrmS
         # full 模式须完成对话式测评与实操（stage 到达实操提交后的 ready 态）方可生成报告
         raise HTTPException(status_code=400, detail="请先完成对话式测评与实操任务")
 
-    # 防重入占位：判题含多次串行 LLM 调用（数十秒），先落库 status 让并发/重试 finish 立即 409
-    session.status = "judging"
+    # 材料快照先取齐（后台线程不依赖请求级会话）：占位后 judging 拦截一切流程推进，消息不可变
+    tasks = _judging_tasks(db, session) if session.mode == "full" else []
+    session.status = "judging"  # 防重入占位 + 进度基数，判题（含多次 LLM 调用）转后台并行
+    session.judging_step = 0
+    session.judging_total = len(tasks)
     db.commit()
+    if _ASYNC_JUDGING:
+        threading.Thread(
+            target=_judge_all_parallel, args=(session.id, tasks), daemon=True, name=f"judge-{session.id}"
+        ).start()
+    else:
+        _judge_all_parallel(session.id, tasks, workers=1)
+    return JSONResponse(status_code=202, content={"session_id": session.id, "judging_total": len(tasks)})
 
-    def _chat(messages: list[dict], **kwargs) -> str:
-        # 无 Key/上游异常时返回空串：judge_answer 解析失败走内置关键词降级，报告建议走模板回退
-        try:
-            return chat_completion(messages, **kwargs)  # model_role 等由调用方传入
-        except ProviderUnavailableError:
-            return ""
 
-    try:
-        # full 模式：先统一判题（对话/实操双通道 + θ 回灌 + 复核队列），全部判完才写报告
-        judged = _judge_subjective(db, session, _chat) if session.mode == "full" else {}
-        report = build_report(db, session, chat_fn=_chat, judged=judged)
-        session.status = "finished"
-        session.finished_at = utcnow()
-        db.add(report)
-        db.commit()
-    except Exception:
-        # 判题/报告异常：丢弃未提交写入（enqueue_review 逐题已提交的结果保留，重试按 asked 跳过），
-        # 回滚占位为 in_progress 保证 finish 可重试，re-raise 维持既有 500 行为
-        db.rollback()
-        session.status = "in_progress"
-        db.commit()
-        raise
-    db.refresh(report)
-    return {"report_id": report.id}
+@router.get("/{session_id}/status")
+def session_status(
+    session_id: int, user: dict = Depends(current_user), db: OrmSession = Depends(get_db)
+) -> dict:
+    """轻量进度端点：finish 202 后前端轮询（判题 x/y → finished 自动出报告）。"""
+    session = db.get(AssessmentSession, session_id)
+    if session is None or session.user_id != user["id"]:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    out = {
+        "status": session.status,
+        "stage": session.stage,
+        "judging_step": session.judging_step,
+        "judging_total": session.judging_total,
+    }
+    if session.status == "finished":
+        report = db.scalar(select(Report).where(Report.session_id == session.id))
+        out["report_id"] = report.id if report is not None else None
+    return out

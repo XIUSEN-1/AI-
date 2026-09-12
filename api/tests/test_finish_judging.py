@@ -2,8 +2,10 @@
 θ 回灌、degraded/needs_review 入复核队列、报告 answers 回显开放题 rationale/score。
 
 单测零真实 LLM 调用：session_routes.chat_completion 以 monkeypatch 注入 MockChat/抛错替身。
-裁定口径：学员零有效发言（无 learner 消息，实操无产物）的题不判分不回灌 θ、score 记 0、
-rationale 注明"学员未作答"。
+裁定口径：学员零有效发言（无 learner 消息，实操无产物）的题不判分不回灌 θ：
+有跳过标记记 score=None 并注明"学员跳过"，否则 score 记 0、注明"学员未作答"。
+本模块大量断言判题调用顺序与逐次调用形状 → 统一内联单 worker 执行（生产为并行后台线程，
+并行墙钟与进度轮询由 tests/test_async_judging.py 覆盖）。
 """
 
 import json
@@ -20,6 +22,12 @@ from app.models import AssessmentSession, Report, ReviewQueue, SessionAnswer, Se
 from test_stage_machine import _run_objective
 
 ARTIFACT = "最终周计划：" + "本周目标是完成接口联调，分工与里程碑如下。" * 10  # ≥200 字
+
+
+@pytest.fixture(autouse=True)
+def _inline_judging(monkeypatch):
+    """判题在请求内以单 worker 顺序执行：MockChat 按序号喂响应才可靠。"""
+    monkeypatch.setattr("app.api.session_routes._ASYNC_JUDGING", False)
 
 
 def _good(score: int) -> str:
@@ -149,7 +157,7 @@ def test_finish_judges_all_channels_and_feeds_theta(monkeypatch, client, auth_he
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
 
     resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
 
     # ---- 判题调用形状：submission=learner 消息拼接，learner_prompts 随行，低温 JSON 模式
     assert len(chat.calls) == 8
@@ -210,7 +218,7 @@ def test_unanswered_questions_score_zero_without_theta_feed(monkeypatch, client,
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
 
     resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     assert len(chat.calls) == 3
 
     after = _snapshot(sid)
@@ -244,7 +252,7 @@ def test_practical_without_artifact_is_unanswered(monkeypatch, client, auth_head
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
 
     resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     assert len(chat.calls) == 1  # 只有报告建议
     answers = _answers(sid)
     assert answers["D5-T05"].score == 0
@@ -278,7 +286,7 @@ def test_provider_unavailable_degrades_and_enqueues_review(monkeypatch, client, 
     monkeypatch.setattr("app.api.session_routes.chat_completion", broken)
 
     resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     # D3 3 次 + D4 3 次 + 产物 3 次 + 过程 1 次 + 建议 1 次 = 11（全部由 provider 包装承接）
     assert broken.calls == 11
 
@@ -304,7 +312,7 @@ def test_divergent_dialog_runs_enqueue_review_with_median(monkeypatch, client, a
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
 
     resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
 
     answers = _answers(sid)
     assert answers["D3-T04"].score == 3  # 三跑 1/4/3 取中位
@@ -321,7 +329,7 @@ def test_process_failure_falls_back_to_artifact_score(monkeypatch, client, auth_
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
 
     resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
 
     body = _report_body(client, auth_headers, sid)
     prac = _practical_item(body)
@@ -379,32 +387,34 @@ def test_progress_endpoints_reject_judging_state(client, auth_headers, bank):
 
 
 def test_finish_failure_rolls_back_judging_for_retry(monkeypatch, client, auth_headers, bank):
-    """判题/报告异常 → 占位回滚 in_progress（500 行为保持）→ 重试成功；幂等早返回先于占位置换。"""
+    """判题/报告异常 → 占位回滚 in_progress（step 归零）→ 重试成功；幂等早返回先于占位置换。"""
     sid, _ = _ready(client, auth_headers, bank)
     seen = []
 
-    class UpstreamTimeout:  # 非 ProviderUnavailableError：不被降级链承接，直接冒泡
+    class UpstreamTimeout:  # 非 ProviderUnavailableError：不被降级链承接，触发线程级回滚
         def __call__(self, messages, **kwargs):
             with SessionLocal() as db2:  # 另一连接观察判题进行中的实时占位状态
                 seen.append(db2.get(AssessmentSession, sid).status)
             raise RuntimeError("上游 LLM 超时")
 
     monkeypatch.setattr("app.api.session_routes.chat_completion", UpstreamTimeout())
-    with pytest.raises(RuntimeError):
-        client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
+    resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
+    assert resp.status_code == 202  # 受理即返回；异常在判题执行内被吞并回滚（内联模式已同步完成）
 
     assert seen == ["judging"]  # 判题期间已占位：客户端超时重试正是撞此窗口
     with SessionLocal() as db:
-        assert db.get(AssessmentSession, sid).status == "in_progress"  # 回滚 → 可重试
+        session = db.get(AssessmentSession, sid)
+        assert session.status == "in_progress" and session.judging_step == 0  # 回滚归零 → 可重试
         assert db.scalar(select(Report).where(Report.session_id == sid)) is None
 
     chat = MockChat([_good(2), _good(2), _ADVICE])
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
     resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     with SessionLocal() as db:
         assert db.get(AssessmentSession, sid).status == "finished"
+        report_id = db.scalar(select(Report).where(Report.session_id == sid)).id
 
     resp2 = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
-    assert resp2.status_code == 200 and resp2.json()["report_id"] == resp.json()["report_id"]
+    assert resp2.status_code == 200 and resp2.json()["report_id"] == report_id
     assert len(chat.calls) == 3  # 重试 = 产物双跑 2 + 建议 1；第二次 finish 零新调用（幂等早返回）
