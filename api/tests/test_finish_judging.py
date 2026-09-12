@@ -220,6 +220,8 @@ def test_unanswered_questions_score_zero_without_theta_feed(monkeypatch, client,
 
     answers = _answers(sid)
     assert answers["D3-T04"].score == 0 and answers["D4-T04"].score == 0
+    seqs = [answers[c].seq for c in ("D3-T04", "D4-T04", "D5-T05")]
+    assert len(set(seqs)) == 3  # 未作答行补 flush 前彼此重号
     body = _report_body(client, auth_headers, sid)
     for dim in ("D3", "D4"):
         item = _open_items(body, dim)[0]

@@ -467,6 +467,7 @@ def _judge_subjective(db: OrmSession, session: AssessmentSession, chat_fn) -> di
                     seq=seq,
                 )
             )
+            db.flush()  # 未作答行同样即时落库：后续题的 max(seq) 查询才能看到，避免重号
             judged[q.code] = {"rationale": UNANSWERED}
             continue
 
