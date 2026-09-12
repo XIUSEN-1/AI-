@@ -35,6 +35,40 @@ def test_validate_rejects_bad_question(bad):
         validate_question(bad)
 
 
+def test_validate_rejects_bool_difficulty():
+    bad = {
+        "id": "X5", "dimension": "D1", "tier": "basic", "type": "single", "difficulty": True,
+        "stem": "s", "options": [{"key": "A", "text": "a"}, {"key": "B", "text": "b"}],
+        "answer": "A", "est_seconds": 60,
+    }
+    with pytest.raises(ValueError):
+        validate_question(bad)
+
+
+def test_validate_rejects_non_dict_option():
+    bad = {
+        "id": "X6", "dimension": "D1", "tier": "basic", "type": "single", "difficulty": 2,
+        "stem": "s", "options": [{"key": "A", "text": "a"}, "B"],
+        "answer": "A", "est_seconds": 60,
+    }
+    with pytest.raises(ValueError):
+        validate_question(bad)
+
+
+def test_import_rejects_duplicate_code_in_batch(items):
+    duplicated = [*items, dict(items[0])]
+    init_db()
+    with SessionLocal() as db:
+        with pytest.raises(ValueError, match="批内存在重复 id"):
+            import_questions(duplicated, db)
+
+
+def test_load_seed_files_error_includes_filename(tmp_path):
+    (tmp_path / "bad_bank.json").write_text(json.dumps({"items": []}), encoding="utf-8")
+    with pytest.raises(ValueError, match="bad_bank.json"):
+        load_seed_files(tmp_path)
+
+
 def test_import_is_idempotent(items):
     init_db()
     with SessionLocal() as db:

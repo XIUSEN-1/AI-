@@ -22,7 +22,11 @@ def load_seed_files(dir_: Path) -> list[dict]:
     items: list[dict] = []
     for path in sorted(dir_.glob("*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
-        items.extend(data["questions"] if isinstance(data, dict) else data)
+        if isinstance(data, dict):
+            if "questions" not in data:
+                raise ValueError(f"{path}: 种子文件缺少 questions 键")
+            data = data["questions"]
+        items.extend(data)
     return items
 
 
@@ -35,7 +39,7 @@ def validate_question(q: dict) -> None:
     if q.get("type") not in ALL_TYPES:
         raise ValueError(f"{code}: type 非法")
     difficulty = q.get("difficulty")
-    if not isinstance(difficulty, int) or not 1 <= difficulty <= 5:
+    if not isinstance(difficulty, int) or isinstance(difficulty, bool) or not 1 <= difficulty <= 5:
         raise ValueError(f"{code}: difficulty 必须为 1..5")
     if q["tier"] == "basic" and difficulty > 3:
         raise ValueError(f"{code}: 基础题难度不得超过 3")
@@ -51,6 +55,8 @@ def validate_question(q: dict) -> None:
         options = q.get("options")
         if not isinstance(options, list) or len(options) < 2:
             raise ValueError(f"{code}: 客观选择题 options 至少 2 项")
+        if not all(isinstance(o, dict) for o in options):
+            raise ValueError(f"{code}: options 的 key/text 不合规")
         keys = {o.get("key") for o in options}
         if len(keys) != len(options) or not all(o.get("text") for o in options):
             raise ValueError(f"{code}: options 的 key/text 不合规")
@@ -79,9 +85,14 @@ def validate_question(q: dict) -> None:
 
 def import_questions(items: list[dict], session: OrmSession) -> dict[str, int]:
     created = updated = 0
+    seen: set[str] = set()
     for raw in items:
         validate_question(raw)
-        existing = session.scalar(select(Question).where(Question.code == raw["id"]))
+        code = raw["id"]
+        if code in seen:
+            raise ValueError(f"{code}: 批内存在重复 id")
+        seen.add(code)
+        existing = session.scalar(select(Question).where(Question.code == code))
         if existing is None:
             session.add(Question(code=raw["id"], **{k: raw.get(k) for k in _MUTABLE}))
             created += 1
