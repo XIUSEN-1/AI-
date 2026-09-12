@@ -93,3 +93,17 @@ class Report(Base):
     gaps: Mapped[list] = mapped_column(JSON)  # ["D1","D6"]
     advice: Mapped[list] = mapped_column(JSON)  # [str]
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ReviewQueue(Base):
+    __tablename__ = "review_queue"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    question_code: Mapped[str] = mapped_column(String(16))
+    session_id: Mapped[int] = mapped_column(ForeignKey("assessment_sessions.id"))
+    answer_id: Mapped[int] = mapped_column(ForeignKey("session_answers.id"))
+    judge_raw: Mapped[dict] = mapped_column(JSON)  # 判题原始结果（含各次跑分）
+    reason: Mapped[str] = mapped_column(String(200))  # 入队原因（如三跑分差过大）
+    status: Mapped[str] = mapped_column(String(12), default="open")  # open | resolved
+    resolved_score: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 人工终评分
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

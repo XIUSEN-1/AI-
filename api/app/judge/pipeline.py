@@ -7,8 +7,10 @@ import math
 from typing import Callable
 
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from app.engine.adaptive import DimensionState, update
+from app.models import ReviewQueue
 
 ChatFn = Callable[..., str]
 
@@ -180,3 +182,32 @@ def _result(best: dict, final: int, scores: list[int]) -> JudgeResult:
 def update_open_result(theta_state: DimensionState, difficulty: float, score: int) -> DimensionState:
     """开放题得分（0~4）折算为掌握度（score/4）后更新能力估计。"""
     return update(theta_state, difficulty, score / 4)
+
+
+def enqueue_review(
+    db: Session,
+    question_code: str,
+    session_id: int,
+    answer_id: int,
+    judge_raw: dict,
+    reason: str,
+) -> ReviewQueue:
+    """将需人工复核的判题结果入队；同一作答已有未处理条目时幂等返回原条目。"""
+    existing = (
+        db.query(ReviewQueue)
+        .filter(ReviewQueue.answer_id == answer_id, ReviewQueue.status == "open")
+        .one_or_none()
+    )
+    if existing is not None:
+        return existing
+    row = ReviewQueue(
+        question_code=question_code,
+        session_id=session_id,
+        answer_id=answer_id,
+        judge_raw=judge_raw,
+        reason=reason,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
