@@ -1,4 +1,4 @@
-"""LLM 接入层测试：全部 monkeypatch httpx 或注入 Mock，绝不触真实 API。"""
+"""LLM 接入层测试：HTTP 层注入 httpx.MockTransport（走真实 httpx 签名与流式路径），绝不触真实 API。"""
 
 import json as jsonlib
 import os
@@ -27,36 +27,12 @@ def use_settings(monkeypatch, **overrides) -> Settings:
     return settings
 
 
-class FakeResponse:
-    """非流式假响应。"""
-
-    def __init__(self, payload=None, status_code=200):
-        self._payload = payload or {"choices": [{"message": {"content": "ok"}}]}
-        self.status_code = status_code
-
-    def json(self):
-        return self._payload
-
-
-class FakeStreamResponse:
-    """SSE 流式假响应：可作上下文管理器并按行迭代。"""
-
-    def __init__(self, lines, status_code=200):
-        self._lines = lines
-        self.status_code = status_code
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def iter_lines(self):
-        return iter(self._lines)
-
-
 def sse_line(delta: dict) -> str:
     return "data: " + jsonlib.dumps({"choices": [{"delta": delta}]})
+
+
+def sse_response(request: httpx.Request, lines: list[str]) -> httpx.Response:
+    return httpx.Response(200, text="\n".join(lines), request=request)
 
 
 # ---------- chat_completion ----------
@@ -65,33 +41,36 @@ def sse_line(delta: dict) -> str:
 def test_chat_completion_sends_expected_payload(monkeypatch):
     captured = {}
 
-    def fake_post(url, json=None, headers=None, timeout=None):
-        captured.update(url=url, json=json, headers=headers, timeout=timeout)
-        return FakeResponse()
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(
+            url=str(request.url),
+            json=jsonlib.loads(request.content),
+            authorization=request.headers["authorization"],
+            timeout=request.extensions["timeout"],
+        )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}, request=request)
 
-    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
     use_settings(monkeypatch)
     messages = [{"role": "user", "content": "hi"}]
-    out = chat_completion(messages, model_role="judge")
+    out = chat_completion(messages, model_role="judge", transport=httpx.MockTransport(handler))
     assert out == "ok"
     assert captured["url"] == "https://api.deepseek.com/chat/completions"
     assert captured["json"]["model"] == "deepseek-v4-pro"
     assert captured["json"]["temperature"] == 0.0
     assert captured["json"]["messages"] == messages
-    assert captured["headers"]["Authorization"] == "Bearer test-key"
-    assert captured["timeout"] == 60
+    assert captured["authorization"] == "Bearer test-key"
+    assert captured["timeout"]["read"] == 60
 
 
 def test_chat_completion_model_role_chat_uses_chat_model(monkeypatch):
     captured = {}
 
-    def fake_post(url, json=None, headers=None, timeout=None):
-        captured.update(json=json)
-        return FakeResponse()
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json=jsonlib.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}, request=request)
 
-    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
     use_settings(monkeypatch)
-    chat_completion([], model_role="chat", temperature=0.7)
+    chat_completion([], model_role="chat", temperature=0.7, transport=httpx.MockTransport(handler))
     assert captured["json"]["model"] == "deepseek-flash"
     assert captured["json"]["temperature"] == 0.7
 
@@ -99,16 +78,16 @@ def test_chat_completion_model_role_chat_uses_chat_model(monkeypatch):
 def test_json_mode_sets_response_format(monkeypatch):
     captured = {}
 
-    def fake_post(url, json=None, headers=None, timeout=None):
-        captured.update(json=json)
-        return FakeResponse()
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json=jsonlib.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}, request=request)
 
-    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
     use_settings(monkeypatch)
-    chat_completion([], model_role="judge", json_mode=True)
+    transport = httpx.MockTransport(handler)
+    chat_completion([], model_role="judge", json_mode=True, transport=transport)
     assert captured["json"]["response_format"] == {"type": "json_object"}
 
-    chat_completion([], model_role="judge")  # 默认关闭
+    chat_completion([], model_role="judge", transport=transport)  # 默认关闭
     assert "response_format" not in captured["json"]
 
 
@@ -119,39 +98,36 @@ def test_no_key_raises(monkeypatch):
 
 
 def test_non_200_raises(monkeypatch):
-    def fake_post(url, **kw):
-        return FakeResponse(status_code=500)
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={}, request=request)
 
-    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
     use_settings(monkeypatch)
     with pytest.raises(ProviderUnavailableError, match="500"):
-        chat_completion([], model_role="judge")
+        chat_completion([], model_role="judge", transport=httpx.MockTransport(handler))
 
 
 def test_chat_completion_wraps_network_error(monkeypatch):
     """连接失败等网络异常必须统一包装为 ProviderUnavailableError 并保留 __cause__，
     否则调用侧（judge/report/冒烟脚本）拿不到统一的降级入口。"""
 
-    def fake_post(url, **kw):
+    def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("连接失败")
 
-    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
     use_settings(monkeypatch)
     with pytest.raises(ProviderUnavailableError, match="网络") as ei:
-        chat_completion([], model_role="judge")
+        chat_completion([], model_role="judge", transport=httpx.MockTransport(handler))
     assert isinstance(ei.value.__cause__, httpx.ConnectError)
 
 
 def test_chat_stream_wraps_timeout_error(monkeypatch):
     """流式路径的网络/超时异常同样包装（httpx.TimeoutException 为 HTTPError 子类）。"""
 
-    def fake_post(url, **kw):
+    def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("读超时")
 
-    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
     use_settings(monkeypatch)
     with pytest.raises(ProviderUnavailableError, match="网络") as ei:
-        list(chat_stream([], model_role="chat"))
+        list(chat_stream([], model_role="chat", transport=httpx.MockTransport(handler)))
     assert isinstance(ei.value.__cause__, httpx.ReadTimeout)
 
 
@@ -161,8 +137,13 @@ def test_chat_stream_wraps_timeout_error(monkeypatch):
 def test_chat_stream_yields_deltas(monkeypatch):
     captured = {}
 
-    def fake_post(url, json=None, headers=None, timeout=None, stream=False):
-        captured.update(url=url, json=json, headers=headers)
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(
+            method=request.method,
+            url=str(request.url),
+            json=jsonlib.loads(request.content),
+            authorization=request.headers["authorization"],
+        )
         lines = [
             sse_line({"content": "你"}),
             ": keep-alive 注释行应被忽略",
@@ -171,15 +152,18 @@ def test_chat_stream_yields_deltas(monkeypatch):
             "data: [DONE]",
             sse_line({"content": "不应出现"}),
         ]
-        return FakeStreamResponse(lines)
+        return sse_response(request, lines)
 
-    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
     use_settings(monkeypatch)
-    deltas = list(chat_stream([{"role": "user", "content": "hi"}], model_role="chat"))
+    deltas = list(
+        chat_stream([{"role": "user", "content": "hi"}], model_role="chat", transport=httpx.MockTransport(handler))
+    )
     assert deltas == ["你", "好"]
+    assert captured["method"] == "POST"
+    assert captured["url"] == "https://api.deepseek.com/chat/completions"
     assert captured["json"]["stream"] is True
     assert captured["json"]["temperature"] == 0.7
-    assert captured["headers"]["Authorization"] == "Bearer test-key"
+    assert captured["authorization"] == "Bearer test-key"
 
 
 def test_chat_stream_no_key_raises(monkeypatch):
@@ -191,7 +175,7 @@ def test_chat_stream_no_key_raises(monkeypatch):
 def test_chat_stream_accepts_data_lines_without_space(monkeypatch):
     """部分上游/代理回显 `data:{json}`（无空格），解析须与 `data: {json}` 等价。"""
 
-    def fake_post(url, json=None, headers=None, timeout=None, stream=False):
+    def handler(request: httpx.Request) -> httpx.Response:
         lines = [
             "data:" + jsonlib.dumps({"choices": [{"delta": {"content": "无"}}]}),
             "data:",  # 空数据行（心跳）应跳过而非 json 解析崩溃
@@ -199,11 +183,10 @@ def test_chat_stream_accepts_data_lines_without_space(monkeypatch):
             "data:[DONE]",  # 结束标记同样可能无空格
             "data: " + jsonlib.dumps({"choices": [{"delta": {"content": "不应出现"}}]}),
         ]
-        return FakeStreamResponse(lines)
+        return sse_response(request, lines)
 
-    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
     use_settings(monkeypatch)
-    deltas = list(chat_stream([], model_role="chat"))
+    deltas = list(chat_stream([], model_role="chat", transport=httpx.MockTransport(handler)))
     assert deltas == ["无", "格"]
 
 
@@ -211,7 +194,7 @@ def test_chat_stream_skips_malformed_frames(monkeypatch):
     """上游坏帧（非 JSON、缺 choices 键、choices 空数组）跳过而非让生成器裸抛，
     否则对话/实操 SSE 路由消费 chat_stream 时会 500 中断整场测评。"""
 
-    def fake_post(url, json=None, headers=None, timeout=None, stream=False):
+    def handler(request: httpx.Request) -> httpx.Response:
         lines = [
             "data: {broken json",  # JSONDecodeError
             sse_line({"content": "好"}),
@@ -221,11 +204,10 @@ def test_chat_stream_skips_malformed_frames(monkeypatch):
             sse_line({"content": "帧"}),
             "data: [DONE]",
         ]
-        return FakeStreamResponse(lines)
+        return sse_response(request, lines)
 
-    monkeypatch.setattr("app.llm.provider.httpx.post", fake_post)
     use_settings(monkeypatch)
-    assert list(chat_stream([], model_role="chat")) == ["好", "帧"]
+    assert list(chat_stream([], model_role="chat", transport=httpx.MockTransport(handler))) == ["好", "帧"]
 
 
 # ---------- Mock ----------
