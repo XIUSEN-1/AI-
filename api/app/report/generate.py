@@ -123,7 +123,8 @@ def generate_llm_advice(
         return fallback, "template"
     messages = _advice_messages(dimensions, gaps)  # try 外构造：dimensions 形状 bug 显形为 KeyError，不被回退边界吞掉
     try:
-        raw = chat_fn(messages, model_role="judge", temperature=0.0, json_mode=True)
+        # 建议走 chat 角色（flash 非思考型，~5-10s）：判题主链路保持 judge（v4-pro 评分一致性）
+        raw = chat_fn(messages, model_role="chat", temperature=0.0, json_mode=True)
         return _parse_advice(raw), "llm"
     except Exception:  # 回退边界：任何 provider/解析失败都不得阻断报告生成
         return fallback, "template"

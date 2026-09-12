@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from pydantic import BaseModel, Field
@@ -132,16 +133,18 @@ def judge_answer(
     *,
     learner_prompts: list[str] | None = None,
 ) -> JudgeResult:
-    """判题主链路：双跑（temperature=0）→ |Δ|≤1 取均值四舍五入；
-    |Δ|>1 第三跑取中位，三跑极差仍 >1 则 needs_review；
-    任一跑解析重试耗尽则降级关键词覆盖度。
+    """判题主链路：双跑并发（同 prompt、temperature=0，chat_fn 线程安全——
+    provider 每调用自建 httpx.Client）→ |Δ|≤1 取均值四舍五入；
+    |Δ|>1 双跑完成后串行追跑第三跑取中位，三跑极差仍 >1 则 needs_review；
+    任一跑解析重试耗尽则降级关键词覆盖度（跑内重试仍串行 ≤MAX_RETRIES）。
     """
     messages = _build_messages(question, submission, learner_prompts)
 
-    run1 = _run_once(chat_fn, messages)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(_run_once, chat_fn, messages) for _ in range(2)]
+        run1, run2 = [f.result() for f in futures]
     if run1 is None:
         return _keyword_fallback(question, submission, "第 1 跑两次重试均失败")
-    run2 = _run_once(chat_fn, messages)
     if run2 is None:
         return _keyword_fallback(question, submission, "第 2 跑两次重试均失败")
 

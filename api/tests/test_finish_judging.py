@@ -172,7 +172,7 @@ def test_finish_judges_all_channels_and_feeds_theta(monkeypatch, client, auth_he
     assert "任务拆解" in process_call["messages"][0]["content"]
     user_text = process_call["messages"][1]["content"]
     assert "帮我拆解任务" in user_text and "这个方案再改改" in user_text
-    assert chat.calls[7]["model_role"] == "judge"  # 报告建议同链路
+    assert chat.calls[7]["model_role"] == "chat"  # 报告建议走 flash（chat 角色）提速
 
     # ---- SessionAnswer 落库：主观题 is_correct=None、submission 存档、seq 续接
     answers = _answers(sid)
@@ -287,8 +287,9 @@ def test_provider_unavailable_degrades_and_enqueues_review(monkeypatch, client, 
 
     resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
     assert resp.status_code == 202
-    # D3 3 次 + D4 3 次 + 产物 3 次 + 过程 1 次 + 建议 1 次 = 11（全部由 provider 包装承接）
-    assert broken.calls == 11
+    # D3 6 次 + D4 6 次 + 产物 6 次 + 过程 1 次 + 建议 1 次 = 20（双跑并行：每题两跑各做
+    # 初次+2 重试；全部由 provider 包装承接）
+    assert broken.calls == 20
 
     answers = _answers(sid)
     body = _report_body(client, auth_headers, sid)
@@ -319,7 +320,7 @@ def test_divergent_dialog_runs_enqueue_review_with_median(monkeypatch, client, a
     reviews = {r.question_code: r for r in _reviews(sid)}
     assert set(reviews) == {"D3-T04"}  # 只有分差过大的题入队
     assert "分差过大" in reviews["D3-T04"].reason
-    assert reviews["D3-T04"].judge_raw["runs"] == [1, 4, 3]
+    assert sorted(reviews["D3-T04"].judge_raw["runs"]) == [1, 3, 4]  # 双跑并行 → 顺序无关
 
 
 def test_process_failure_falls_back_to_artifact_score(monkeypatch, client, auth_headers, bank):
@@ -401,7 +402,7 @@ def test_finish_failure_rolls_back_judging_for_retry(monkeypatch, client, auth_h
     resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
     assert resp.status_code == 202  # 受理即返回；异常在判题执行内被吞并回滚（内联模式已同步完成）
 
-    assert seen == ["judging"]  # 判题期间已占位：客户端超时重试正是撞此窗口
+    assert seen == ["judging", "judging"]  # 双跑并行：两次调用都撞占位窗口
     with SessionLocal() as db:
         session = db.get(AssessmentSession, sid)
         assert session.status == "in_progress" and session.judging_step == 0  # 回滚归零 → 可重试

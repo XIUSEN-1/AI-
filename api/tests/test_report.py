@@ -89,9 +89,9 @@ def test_llm_advice_success_marks_llm_source():
     advice, source = generate.generate_llm_advice(_dims(), ["D1", "D6"], chat)
     assert source == "llm"
     assert advice == ["建议一：D1 归因+行动", "建议二：D6 归因+行动"]
-    # prompt 必须带六维分数与短板维度明细，且走低温 JSON 模式
+    # prompt 必须带六维分数与短板维度明细，且走 chat 角色（flash 非思考型提速）、低温 JSON 模式
     assert len(chat.calls) == 1
-    assert chat.calls[0]["model_role"] == "judge"
+    assert chat.calls[0]["model_role"] == "chat"
     assert chat.calls[0]["temperature"] == 0.0
     assert chat.calls[0]["json_mode"] is True
     text = "\n".join(m["content"] for m in chat.calls[0]["messages"])
@@ -181,7 +181,7 @@ def test_finish_endpoint_wires_provider_chat_fn(client, auth_headers, bank, monk
     from app.api import session_routes
 
     def fake_chat_completion(messages, *, model_role, temperature=0.0, json_mode=False, timeout=60):
-        assert model_role == "judge"
+        assert model_role == "chat"  # 报告建议走 flash（chat 角色），判题主链路仍为 judge
         assert json_mode is True
         return json.dumps({"advice": ["端点级 LLM 建议"]}, ensure_ascii=False)
 
