@@ -4,6 +4,8 @@
 admin 全权可代查；聚合数字与学员各自报告逐项对账。零真实 LLM（quick 流程仅客观题规则判分）。
 """
 
+import csv
+import io
 import uuid
 
 import pytest
@@ -147,6 +149,29 @@ def test_export_csv_bom_headers_and_rows(client, bank):
     data_row = next(line for line in lines[1:] if me["name"] in line)
     cells = data_row.split(",")
     assert len([c for c in cells if c.strip()]) >= 7  # 姓名+学号+六维得分齐全
+
+
+def test_export_csv_neutralizes_formula_injection(client, bank):
+    """CSV 公式注入中和：以 = + - @ 等开头的自由文本单元格写出前前置单引号，防 Excel 求值。"""
+    teacher = make_teacher(client, uuid.uuid4().hex[:6])
+    klass = client.post("/api/teacher/classes", json={"name": "注入班"}, headers=teacher).json()
+    evil_name = '=HYPERLINK(A1,"x")'
+    evil_no = "+CMD" + uuid.uuid4().hex[:6]
+    resp = client.post(
+        "/api/auth/student",
+        json={"name": evil_name, "student_no": evil_no, "invite_code": klass["invite_code"]},
+    )
+    assert resp.status_code == 200, resp.text
+    student = {"Authorization": f"Bearer {resp.json()['token']}"}
+    view = _run_full_flow(client, student, bank, correct=True)
+    finish_and_wait(client, student, view["session_id"])
+
+    content = client.get(f"/api/teacher/classes/{klass['id']}/export.csv", headers=teacher).content
+    text = content.decode("utf-8-sig")
+    rows = list(csv.reader(io.StringIO(text)))
+    row = next(r for r in rows[1:] if r and r[0].lstrip("'").startswith("=HYPERLINK"))
+    assert row[0] == "'" + evil_name, "公式前缀姓名必须以单引号中和"
+    assert row[1] == "'" + evil_no, "公式前缀学号必须以单引号中和"
 
 
 def test_student_forbidden_on_teacher_routes(client):

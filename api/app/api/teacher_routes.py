@@ -177,9 +177,18 @@ def class_analytics(class_id: int, user: dict = Depends(require_roles("teacher",
     }
 
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _safe_cell(value: str) -> str:
+    """CSV 公式注入中和：以 = + - @ 或 Tab/CR 开头的文本前置单引号，防 Excel 求值。"""
+    return "'" + value if value.startswith(_FORMULA_PREFIXES) else value
+
+
 @router.get("/classes/{class_id}/export.csv")
 def export_class_csv(class_id: int, user: dict = Depends(require_roles("teacher", "admin")), db: OrmSession = Depends(get_db)) -> Response:
-    """学员×六维最新得分 CSV：中文表头，UTF-8 BOM（Excel 直接打开不乱码）。"""
+    """学员×六维最新得分 CSV：中文表头，UTF-8 BOM（Excel 直接打开不乱码）；
+    姓名/学号为注册侧自由文本，写出前做公式注入中和。"""
     klass = _owned_class(db, class_id, user)
     students = _class_students(db, klass.id)
     _, latest = _class_reports(db, students)
@@ -188,7 +197,7 @@ def export_class_csv(class_id: int, user: dict = Depends(require_roles("teacher"
     writer.writerow(["姓名", "学号", *[DIMENSION_NAMES[d] for d in DIMENSIONS]])
     for s in students:
         report = latest.get(s.id)
-        row = [s.name, s.student_no]
+        row = [_safe_cell(s.name), _safe_cell(s.student_no)]
         for d in DIMENSIONS:
             row.append(_dim_percent(report, d) if report is not None else "")
         writer.writerow(row)

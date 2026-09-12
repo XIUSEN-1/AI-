@@ -1,4 +1,5 @@
 import json
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ from app.models import AssessmentSession
 from app.report import generate
 from app.report.generate import build_report
 from conftest import finish_and_wait
+from test_teacher import make_teacher, register_student
 from tests.test_session_flow import _run_full_flow
 
 
@@ -55,6 +57,50 @@ def test_report_forbidden_for_others(client, auth_headers, bank):
     other = client.post("/api/auth/student", json={"name": "他人", "student_no": "OTHER01"}).json()
     resp = client.get(f"/api/reports/{report_id}", headers={"Authorization": f"Bearer {other['token']}"})
     assert resp.status_code == 403
+
+
+# ---------- 教师读报告限权（M2c fix round 1）：仅本班、且剥离逐题明细 ----------
+
+def _class_scenario(client: TestClient, bank: dict):
+    """教师建班→学员入班→完成一次测评；返回 (teacher 头, student 头, report_id)。"""
+    teacher = make_teacher(client, uuid.uuid4().hex[:6])
+    klass = client.post("/api/teacher/classes", json={"name": "报告班"}, headers=teacher).json()
+    student = register_student(client, "R" + uuid.uuid4().hex[:5], klass["invite_code"])
+    report_id = _finish_a_session(client, student, bank)
+    return teacher, student, report_id
+
+
+def test_teacher_reads_own_class_report_without_answers(client, bank):
+    """本班 teacher 可读学员报告，但仅维度聚合层级：剥离 answers 逐题明细；本人仍完整。"""
+    teacher, student, report_id = _class_scenario(client, bank)
+    resp = client.get(f"/api/reports/{report_id}", headers=teacher)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "answers" not in body, "教师版报告不得含单个作答明细"
+    assert len(body["dimensions"]) == 6 and body["advice"]  # 聚合层级完整保留
+    assert "answers" in client.get(f"/api/reports/{report_id}", headers=student).json()
+
+
+def test_report_forbidden_for_other_class_teacher(client, bank):
+    teacher, _, report_id = _class_scenario(client, bank)
+    other = make_teacher(client, uuid.uuid4().hex[:6])
+    assert client.get(f"/api/reports/{report_id}", headers=other).status_code == 403
+
+
+def test_report_forbidden_for_teacher_when_student_has_no_class(client, bank):
+    """学员无班级（自由测评）时 Klass 关联缺失，teacher 不可读。"""
+    free = {"Authorization": f"Bearer {client.post('/api/auth/student', json={'name': '自由学员', 'student_no': f'RF-{uuid.uuid4().hex[:6]}'}).json()['token']}"}
+    report_id = _finish_a_session(client, free, bank)
+    teacher, _, _ = _class_scenario(client, bank)
+    assert client.get(f"/api/reports/{report_id}", headers=teacher).status_code == 403
+
+
+def test_report_full_for_admin(client, bank):
+    _, _, report_id = _class_scenario(client, bank)
+    admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"}).json()
+    resp = client.get(f"/api/reports/{report_id}", headers={"Authorization": f"Bearer {admin['token']}"})
+    assert resp.status_code == 200
+    assert "answers" in resp.json()  # admin 全权：完整报告
 
 
 def _dims() -> list[dict]:
