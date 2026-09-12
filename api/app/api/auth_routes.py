@@ -45,6 +45,8 @@ def student_register(body: StudentRegisterIn, db: OrmSession = Depends(get_db)) 
         db.add(user)
         db.commit()
         db.refresh(user)
+    elif user.role != "student":
+        raise HTTPException(status_code=400, detail="该学号不是学员账号，请使用账号密码登录")
     return {"token": make_token(user.id, user.role), "user": {"id": user.id, "name": user.name, "role": user.role}}
 
 

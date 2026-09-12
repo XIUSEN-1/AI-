@@ -143,6 +143,8 @@ def submit_answer(
     asked = {a.question_code for a in answers}
     if question.code in asked:
         raise HTTPException(status_code=400, detail="该题已作答")
+    if question.type not in OBJECTIVE_TYPES:
+        raise HTTPException(status_code=400, detail="该题型不支持线上客观作答")
     if question.type == "judge" and not isinstance(body.answer, bool):
         raise HTTPException(status_code=400, detail="判断题答案必须为布尔值")
 

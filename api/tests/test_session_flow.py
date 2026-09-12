@@ -91,3 +91,31 @@ def test_judge_answer_must_be_bool(client, auth_headers):
             if row is not None:
                 db.delete(row)
                 db.commit()
+
+
+def test_open_question_answer_rejected(client, auth_headers):
+    """open/practical 题不支持线上客观作答，提交其 id 必须 400 而非 500。"""
+    with SessionLocal() as db:
+        open_q = Question(
+            code="D1-O01", dimension="D1", tier="advanced", type="open",
+            difficulty=5, stem="请描述你会如何评估一段 AI 生成的内容。", tags=[],
+        )
+        db.add(open_q)
+        db.commit()
+        db.refresh(open_q)
+        question_id = open_q.id
+    try:
+        start = client.post("/api/sessions", json={"mode": "full"}, headers=auth_headers).json()
+        resp = client.post(
+            f"/api/sessions/{start['session_id']}/answer",
+            json={"question_id": question_id, "answer": "随便答", "time_spent": 60},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "该题型不支持线上客观作答"
+    finally:
+        with SessionLocal() as db:  # 清理插入的题目，避免污染共享测试库的题目计数
+            row = db.get(Question, question_id)
+            if row is not None:
+                db.delete(row)
+                db.commit()

@@ -33,6 +33,13 @@ def test_invalid_invite_code_rejected():
     assert resp.status_code == 400
 
 
+def test_student_register_cannot_takeover_non_student():
+    """已知非学员学号（如 admin）不得经注册接口换取其角色令牌。"""
+    client = TestClient(app)
+    resp = client.post("/api/auth/student", json={"name": "x", "student_no": "admin"})
+    assert resp.status_code == 400
+
+
 def test_admin_password_login():
     client = TestClient(app)
     resp = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
