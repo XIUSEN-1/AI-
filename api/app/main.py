@@ -35,6 +35,10 @@ _DIST = Path(__file__).resolve().parent.parent.parent / "web" / "dist"
 def spa_fallback(full_path: str):
     if full_path.startswith("api/") or not _DIST.exists():
         raise HTTPException(status_code=404)
+    dist_root = _DIST.resolve()
+    candidate = (_DIST / full_path).resolve()
+    if candidate.is_relative_to(dist_root) and candidate.is_file():
+        return FileResponse(candidate)
     index = _DIST / "index.html"
     if not index.exists():
         raise HTTPException(status_code=404)
