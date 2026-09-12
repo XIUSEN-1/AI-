@@ -30,7 +30,7 @@ def test_bank_coverage_per_dimension(dim):
 def test_bank_all_valid_and_unique():
     items = load_seed_files(SEEDS)
     codes = [q["id"] for q in items]
-    assert len(codes) == len(set(codes)) == 300 + 50 * len(BATCH2_DIMS) + 67 * len(BATCH3_DIMS)
+    assert len(codes) == len(set(codes)) == 300 + 50 * len(BATCH2_DIMS) + sum(BATCH3_QUOTA.values())
     for q in items:
         validate_question(q)
 
@@ -41,7 +41,9 @@ def _id_num(qid: str) -> int:
 
 
 BATCH2_DIMS = ["D1", "D2", "D3", "D4", "D5", "D6"]  # 批次 2 按任务逐维扩展：Task1 D1+D2 → Task2 +D3+D4 → Task3 +D5+D6
-BATCH3_DIMS = ["D1", "D2", "D3", "D4"]  # 批次 3 按任务逐维扩展：Task1 D1+D2 → Task2 +D3+D4 → Task3 +D5+D6
+BATCH3_DIMS = ["D1", "D2", "D3", "D4", "D5", "D6"]  # 批次 3 按任务逐维扩展：Task1 D1+D2 → Task2 +D3+D4 → Task3 +D5+D6（全六维）
+# 批次 3 每维新增：D1~D4 各 67（客观 53 + open 10 + practical 4）；D5/D6 各 66（客观 53 + open 9 + practical 4）
+BATCH3_QUOTA = {dim: (67 if dim in ("D1", "D2", "D3", "D4") else 66) for dim in BATCH3_DIMS}
 
 
 def test_bank_batch1_quota():
@@ -78,7 +80,7 @@ def test_bank_batch2_quota():
     """批次 2：已写入维度每维 +50（客观 40：d1×8/d2×10/d3×10/d4×8/d5×4 + 主观 10：7 open + 3 practical），
     id 续号 B56..B83 / H25..H36 / A22..A31（区间收界，防批次 3 溢入），难度金字塔精确。"""
     items = load_seed_files(SEEDS)
-    assert len(items) == 300 + 50 * len(BATCH2_DIMS) + 67 * len(BATCH3_DIMS)
+    assert len(items) == 300 + 50 * len(BATCH2_DIMS) + sum(BATCH3_QUOTA.values())
     for dim in BATCH2_DIMS:
         qs = [q for q in items if q["dimension"] == dim]
         if dim not in BATCH3_DIMS:
@@ -104,13 +106,16 @@ def test_bank_batch2_quota():
 
 
 def test_bank_batch3_quota():
-    """批次 3：已写入维度每维 +67（客观 53：d1×10/d2×13/d3×13/d4×11/d5×6 + 主观 14：10 open + 4 practical），
-    id 续号 B84..B119 / H37..H53 / A32..A45，难度金字塔精确。"""
+    """批次 3：D1~D4 每维 +67（客观 53：d1×10/d2×13/d3×13/d4×11/d5×6 + 主观 14：10 open + 4 practical）、
+    D5/D6 每维 +66（客观 53 同金字塔 + 主观 13：9 open + 4 practical），
+    id 续号 B84..B119 / H37..H53 / A32..，难度金字塔精确，总题量 1000。"""
     items = load_seed_files(SEEDS)
-    assert len(items) == 300 + 50 * len(BATCH2_DIMS) + 67 * len(BATCH3_DIMS)
+    assert len(items) == 300 + 50 * len(BATCH2_DIMS) + sum(BATCH3_QUOTA.values()) == 1000
     for dim in BATCH3_DIMS:
+        quota = BATCH3_QUOTA[dim]
+        n_open = quota - 53 - 4  # 客观 53 + practical 4，余下为 open（10 或 9）
         qs = [q for q in items if q["dimension"] == dim]
-        assert len(qs) == 100 + 67, f"{dim} 批次3后应为 167 题"
+        assert len(qs) == 100 + quota, f"{dim} 批次3后应为 {100 + quota} 题"
         basic = [q for q in qs if q["tier"] == "basic"]
         adv_obj = [q for q in qs if q["tier"] == "advanced" and q["type"] in ("single", "multi", "judge")]
         new_basic = [q for q in basic if _id_num(q["id"]) >= 84]
@@ -123,9 +128,9 @@ def test_bank_batch3_quota():
         for q in new_basic + new_adv_obj:
             by_diff[q["difficulty"]] = by_diff.get(q["difficulty"], 0) + 1
         assert by_diff == {1: 10, 2: 13, 3: 13, 4: 11, 5: 6}, f"{dim} 批次3难度金字塔不符：{by_diff}"
-        # 主观题：A32..A41 open（10）+ A42..A45 practical（4），advanced 且难度 4..5
+        # 主观题：A32.. open（n_open）+ practical（4），advanced 且难度 4..5
         new_subj = [q for q in qs if q["type"] in ("open", "practical") and _id_num(q["id"]) >= 32]
-        assert [q["id"] for q in new_subj] == [f"{dim}-A{n}" for n in range(32, 46)], f"{dim} 批次3主观续号不符"
-        assert sum(q["type"] == "open" for q in new_subj) == 10, f"{dim} open 应为 10"
+        assert [q["id"] for q in new_subj] == [f"{dim}-A{n}" for n in range(32, 32 + n_open + 4)], f"{dim} 批次3主观续号不符"
+        assert sum(q["type"] == "open" for q in new_subj) == n_open, f"{dim} open 应为 {n_open}"
         assert sum(q["type"] == "practical" for q in new_subj) == 4, f"{dim} practical 应为 4"
         assert all(q["tier"] == "advanced" and 4 <= q["difficulty"] <= 5 for q in new_subj)
