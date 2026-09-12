@@ -1,0 +1,27 @@
+# 前端
+node_modules/
+dist/
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# 数据与密钥
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# IDE / 系统
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
