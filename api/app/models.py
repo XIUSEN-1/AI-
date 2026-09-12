@@ -89,7 +89,7 @@ class SessionMessage(Base):
     session_id: Mapped[int] = mapped_column(ForeignKey("assessment_sessions.id"))
     question_id: Mapped[int] = mapped_column(ForeignKey("questions.id"))
     channel: Mapped[str] = mapped_column(String(12))  # dialog | practical
-    role: Mapped[str] = mapped_column(String(12))  # learner | examiner | assistant
+    role: Mapped[str] = mapped_column(String(12))  # learner | examiner | assistant | submit(产物提交)
     content: Mapped[str] = mapped_column(Text)  # 学员发言/考官回复/实操产物文本
     seq: Mapped[int] = mapped_column(Integer)  # 会话内全局递增，保留完整时间线
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

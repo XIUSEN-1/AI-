@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.auth_routes import router as auth_router
 from app.api.dialog_routes import router as dialog_router
+from app.api.practical_routes import router as practical_router
 from app.api.report_routes import router as report_router
 from app.api.session_routes import router as session_router
 
@@ -22,6 +23,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(session_router)
 app.include_router(dialog_router)
+app.include_router(practical_router)
 app.include_router(report_router)
 
 
