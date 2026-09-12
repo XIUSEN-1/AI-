@@ -127,3 +127,23 @@ class ReviewQueue(Base):
     status: Mapped[str] = mapped_column(String(12), default="open")  # open | resolved
     resolved_score: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 人工终评分
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class PracticeSession(Base):
+    __tablename__ = "practice_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    question_ids: Mapped[list] = mapped_column(JSON)  # 练习卷题目 id 顺序快照
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class PracticeAnswer(Base):
+    __tablename__ = "practice_answers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    practice_session_id: Mapped[int] = mapped_column(ForeignKey("practice_sessions.id"))
+    question_id: Mapped[int] = mapped_column(ForeignKey("questions.id"))
+    answer: Mapped[object] = mapped_column(JSON)
+    is_correct: Mapped[bool] = mapped_column(Boolean)  # 即时规则判分；不回灌 θ、不进正式报告
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

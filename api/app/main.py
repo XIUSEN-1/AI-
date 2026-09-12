@@ -10,6 +10,7 @@ from sqlalchemy import update
 from app.api.auth_routes import router as auth_router
 from app.api.dialog_routes import router as dialog_router
 from app.api.practical_routes import router as practical_router
+from app.api.practice_routes import router as practice_router
 from app.api.report_routes import router as report_router
 from app.api.session_routes import router as session_router
 from app.db import SessionLocal, init_db
@@ -49,6 +50,7 @@ app.include_router(session_router)
 app.include_router(dialog_router)
 app.include_router(practical_router)
 app.include_router(report_router)
+app.include_router(practice_router)
 
 
 @app.get("/api/health")
