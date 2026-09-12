@@ -20,7 +20,7 @@ from app.engine.adaptive import DIMENSIONS, DIMENSION_NAMES, DimensionState
 from app.engine.grading import grade_objective, result_from_correct
 from app.judge.pipeline import enqueue_review, judge_answer, update_open_result
 from app.llm.provider import ProviderUnavailableError, chat_completion
-from app.models import AssessmentSession, Question, Report, SessionAnswer, SessionMessage, utcnow
+from app.models import AssessmentSession, Klass, Question, Report, SessionAnswer, SessionMessage, User, utcnow
 from app.report.generate import build_report
 
 logger = logging.getLogger(__name__)
@@ -682,9 +682,16 @@ def finish_session(session_id: int, user: dict = Depends(current_user), db: OrmS
     session.judging_total = len(tasks)
     db.commit()
     if _ASYNC_JUDGING:
-        threading.Thread(
-            target=_judge_all_parallel, args=(session.id, tasks), daemon=True, name=f"judge-{session.id}"
-        ).start()
+        try:
+            threading.Thread(
+                target=_judge_all_parallel, args=(session.id, tasks), daemon=True, name=f"judge-{session.id}"
+            ).start()
+        except RuntimeError:
+            # spawn 失败（线程耗尽等，M2b2 遗留加固）：回滚 judging 占位，学员可重试 finish
+            session.status = "in_progress"
+            session.judging_step = 0
+            db.commit()
+            raise HTTPException(status_code=503, detail="判题服务繁忙，请稍后重试")
     else:
         _judge_all_parallel(session.id, tasks, workers=1)
     return JSONResponse(status_code=202, content={"session_id": session.id, "judging_total": len(tasks)})
@@ -708,3 +715,56 @@ def session_status(
         report = db.scalar(select(Report).where(Report.session_id == session.id))
         out["report_id"] = report.id if report is not None else None
     return out
+
+
+# ---------- 会话查询与断线续答（M2c，spec §10）----------
+# 注意：/active 必须先于 /{session_id} 注册，否则被 int 路径参数抢先匹配成 422
+
+
+@router.get("/active")
+def active_session(user: dict = Depends(current_user), db: OrmSession = Depends(get_db)) -> dict | None:
+    """断线续答：本人最近一个 in_progress 会话的恢复信息（会话 id/阶段/已答进度/开始时间）；
+    无进行中会话（含判题中/已结束）返回 null。"""
+    session = db.scalar(
+        select(AssessmentSession)
+        .where(AssessmentSession.user_id == user["id"], AssessmentSession.status == "in_progress")
+        .order_by(AssessmentSession.id.desc())
+    )
+    if session is None:
+        return None
+    view = _session_view(db, session)
+    return {
+        "session_id": session.id,
+        "stage": session.stage,
+        "progress": view["progress"],
+        "started_at": session.started_at.isoformat() + "Z",
+    }
+
+
+@router.get("/{session_id}")
+def get_session_detail(session_id: int, user: dict = Depends(current_user), db: OrmSession = Depends(get_db)) -> dict:
+    """会话完整视图：SessionView + 消息历史 [{channel, role, content, seq}]（仅本人）。
+    teacher/admin 可查但仅元数据不含消息；teacher 限本班学员，其他学员 404（不泄露存在性）。"""
+    session = db.get(AssessmentSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    is_owner = session.user_id == user["id"]
+    if not is_owner:
+        if user["role"] == "student":
+            raise HTTPException(status_code=404, detail="会话不存在")
+        owner = db.get(User, session.user_id)
+        if user["role"] == "teacher":
+            klass = db.get(Klass, owner.class_id) if owner is not None and owner.class_id else None
+            if klass is None or klass.teacher_id != user["id"]:
+                raise HTTPException(status_code=403, detail="无权查看该会话")
+        # admin 全权放行
+    view = _session_view(db, session)
+    if not is_owner:
+        return view  # 教师端仅元数据不含消息
+    messages = db.scalars(
+        select(SessionMessage).where(SessionMessage.session_id == session.id).order_by(SessionMessage.seq)
+    ).all()
+    view["messages"] = [
+        {"channel": m.channel, "role": m.role, "content": m.content, "seq": m.seq} for m in messages
+    ]
+    return view

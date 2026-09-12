@@ -7,12 +7,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import update
 
+from app.api.admin_routes import router as admin_router
 from app.api.auth_routes import router as auth_router
 from app.api.dialog_routes import router as dialog_router
 from app.api.practical_routes import router as practical_router
 from app.api.practice_routes import router as practice_router
 from app.api.report_routes import router as report_router
 from app.api.session_routes import router as session_router
+from app.api.teacher_routes import router as teacher_router
 from app.db import SessionLocal, init_db
 from app.models import AssessmentSession
 
@@ -51,6 +53,8 @@ app.include_router(dialog_router)
 app.include_router(practical_router)
 app.include_router(report_router)
 app.include_router(practice_router)
+app.include_router(teacher_router)
+app.include_router(admin_router)
 
 
 @app.get("/api/health")

@@ -41,6 +41,7 @@ def init_db() -> None:
     Base.metadata.create_all(engine)
     _migrate_report_columns()
     _migrate_session_columns()
+    _migrate_class_columns()
 
 
 def _migrate_report_columns() -> None:
@@ -78,3 +79,17 @@ def _migrate_session_columns() -> None:
         for column, ddl in additions.items():
             if column not in cols:
                 conn.execute(text(ddl))
+
+
+def _migrate_class_columns() -> None:
+    """为 M2c 前的旧库补齐 classes.teacher_id（幂等，新库天然跳过）。
+    SQLite ALTER 无法补外键约束，仅加列（旧库经应用层保证归属校验）。"""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if not insp.has_table("classes"):
+        return
+    cols = {c["name"] for c in insp.get_columns("classes")}
+    with engine.begin() as conn:
+        if "teacher_id" not in cols:
+            conn.execute(text("ALTER TABLE classes ADD COLUMN teacher_id INTEGER"))

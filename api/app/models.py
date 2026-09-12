@@ -18,6 +18,7 @@ class Klass(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64))
     invite_code: Mapped[str] = mapped_column(String(16), unique=True)
+    teacher_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)  # M2c：建班教师（自由测评班等为空）
 
 
 class User(Base):

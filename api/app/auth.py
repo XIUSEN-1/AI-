@@ -38,3 +38,14 @@ def current_user(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) 
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="登录已失效")
     return {"id": int(payload["sub"]), "role": payload["role"]}
+
+
+def require_roles(*roles: str):
+    """路由角色守卫（M2c）：白名单外 403；未登录/登录失效仍由 current_user 先行 401。"""
+
+    def dependency(user: dict = Depends(current_user)) -> dict:
+        if user["role"] not in roles:
+            raise HTTPException(status_code=403, detail="无权访问")
+        return user
+
+    return dependency
