@@ -302,7 +302,7 @@ def test_provider_unavailable_degrades_and_enqueues_review(monkeypatch, client, 
     assert set(reviews) == {"D3-T04", "D4-T04", "D5-T05"}  # 三题全降级入队
     assert reviews["D5-T05"].reason and "降级" in reviews["D5-T05"].reason
 
-    assert body["advice_source"] == "template"  # provider 异常 → 建议走模板
+    assert body["advice_source"] == "cell"  # provider 异常 → 建议回退分级建议库格子直渲染
     prac = _practical_item(body)
     assert prac["score"] == 0.0 and "降级" in prac["rationale"]  # 过程失败按产物分（降级 0）折算
 

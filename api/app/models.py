@@ -109,7 +109,8 @@ class Report(Base):
     strengths: Mapped[list] = mapped_column(JSON)  # ["D2","D3"]
     gaps: Mapped[list] = mapped_column(JSON)  # ["D1","D6"]
     advice: Mapped[list] = mapped_column(JSON)  # [str]
-    advice_source: Mapped[str] = mapped_column(String(8), default="template")  # llm | template
+    advice_source: Mapped[str] = mapped_column(String(8), default="template")  # llm | cell | template（仅库缺失兜底）
+    advice_detail: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 建议条目明细（M2e 起；旧报告为 NULL）
     answers: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 逐题回显快照（M2a 前的报告为 NULL）
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

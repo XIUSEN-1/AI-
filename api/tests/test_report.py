@@ -9,7 +9,7 @@ from app.llm.mock import MockChat
 from app.llm.provider import ProviderUnavailableError
 from app.models import AssessmentSession
 from app.report import generate
-from app.report.generate import ADVICE_HIGH, ADVICE_LOW, build_report
+from app.report.generate import build_report
 from conftest import finish_and_wait
 from tests.test_session_flow import _run_full_flow
 
@@ -75,20 +75,15 @@ def _dims() -> list[dict]:
     ]
 
 
-def _template_for(dims: list[dict], gaps: list[str]) -> list[str]:
-    by_dim = {x["dimension"]: x for x in dims}
-    return [
-        f"「{by_dim[d]['name']}」当前 {by_dim[d]['level_name']}："
-        + (ADVICE_LOW[d] if by_dim[d]["level"] <= 2 else ADVICE_HIGH[d])
-        for d in sorted(gaps)
-    ]
-
-
 def test_llm_advice_success_marks_llm_source():
     chat = MockChat([json.dumps({"advice": ["建议一：D1 归因+行动", "建议二：D6 归因+行动"]}, ensure_ascii=False)])
-    advice, source = generate.generate_llm_advice(_dims(), ["D1", "D6"], chat)
+    advice, source, detail = generate.generate_llm_advice(_dims(), ["D1", "D6"], chat)
     assert source == "llm"
     assert advice == ["建议一：D1 归因+行动", "建议二：D6 归因+行动"]
+    assert detail == [
+        {"text": "建议一：D1 归因+行动", "source_type": "llm"},
+        {"text": "建议二：D6 归因+行动", "source_type": "llm"},
+    ]
     # prompt 必须带六维分数与短板维度明细，且走 chat 角色（flash 非思考型提速）、低温 JSON 模式
     assert len(chat.calls) == 1
     assert chat.calls[0]["model_role"] == "chat"
@@ -102,9 +97,21 @@ def test_llm_advice_success_marks_llm_source():
 
 def test_llm_advice_caps_at_three_items():
     chat = MockChat([json.dumps({"advice": ["一", "二", "三", "四", "五"]}, ensure_ascii=False)])
-    advice, source = generate.generate_llm_advice(_dims(), ["D1"], chat)
+    advice, source, detail = generate.generate_llm_advice(_dims(), ["D1"], chat)
     assert source == "llm"
     assert advice == ["一", "二", "三"]
+    assert len(detail) == 3
+
+
+def _assert_cell_fallback(dims, gaps, advice, source, detail):
+    """无 LLM/失败回退断言：格子直渲染 + source=cell + 明细对齐。"""
+    assert source == "cell"
+    assert [e["text"] for e in detail] == advice
+    assert [e["dimension"] for e in detail] == sorted(gaps)
+    for e, d in zip(detail, sorted(gaps)):
+        assert e["source_type"] == "cell"
+        assert e["cell"] == generate._advice_cell(d, 1)  # _dims 弱维 level=1
+        assert e["cell"]["summary"][:15] in e["text"]
 
 
 def test_llm_advice_falls_back_on_provider_error():
@@ -112,25 +119,20 @@ def test_llm_advice_falls_back_on_provider_error():
         raise ProviderUnavailableError("缺少 DEEPSEEK_API_KEY，无法调用 LLM")
 
     dims, gaps = _dims(), ["D1", "D6"]
-    advice, source = generate.generate_llm_advice(dims, gaps, boom)
-    assert source == "template"
-    assert advice == _template_for(dims, gaps)
+    advice, source, detail = generate.generate_llm_advice(dims, gaps, boom)
+    _assert_cell_fallback(dims, gaps, advice, source, detail)
 
 
 def test_llm_advice_falls_back_on_bad_payload():
     bad_outputs = ["这不是JSON", json.dumps({"advice": []}), json.dumps({"advice": "一条"}), json.dumps([1, 2]), ""]
-    dims, gaps = _dims(), ["D1", "D6"]
     for raw in bad_outputs:
-        advice, source = generate.generate_llm_advice(dims, gaps, MockChat([raw]))
-        assert source == "template"
-        assert advice == _template_for(dims, gaps)
+        advice, source, detail = generate.generate_llm_advice(_dims(), ["D1", "D6"], MockChat([raw]))
+        _assert_cell_fallback(_dims(), ["D1", "D6"], advice, source, detail)
 
 
-def test_llm_advice_none_chat_fn_uses_template():
-    dims, gaps = _dims(), ["D1", "D6"]
-    advice, source = generate.generate_llm_advice(dims, gaps, None)
-    assert source == "template"
-    assert advice == _template_for(dims, gaps)
+def test_llm_advice_none_chat_fn_renders_cells():
+    advice, source, detail = generate.generate_llm_advice(_dims(), ["D1", "D6"], None)
+    _assert_cell_fallback(_dims(), ["D1", "D6"], advice, source, detail)
 
 
 def test_llm_advice_prompt_shape_bug_surfaces():
@@ -146,8 +148,11 @@ def test_llm_advice_prompt_shape_bug_surfaces():
 def test_finish_report_answers_shape_and_order(client, auth_headers, bank):
     report_id = _finish_a_session(client, auth_headers, bank)
     body = client.get(f"/api/reports/{report_id}", headers=auth_headers).json()
-    # 测试环境无 DEEPSEEK_API_KEY → provider 抛错被吞，报告标记模板来源
-    assert body["advice_source"] == "template"
+    # 测试环境无 DEEPSEEK_API_KEY → provider 抛错被吞，报告回退分级建议库直渲染
+    assert body["advice_source"] == "cell"
+    assert len(body["advice_detail"]) == len(body["advice"])
+    assert all(e["source_type"] == "cell" for e in body["advice_detail"])
+    assert all(e["cell"]["resources"] for e in body["advice_detail"])
     answers = body["answers"]
     assert len(answers) == sum(d["answered"] for d in body["dimensions"])
     keys = {"seq", "dimension", "type", "stem_head", "is_correct", "score", "explanation", "theta_after"}
@@ -168,6 +173,7 @@ def test_build_report_with_mock_llm_marks_llm(client, auth_headers, bank):
         report = build_report(db, session, chat_fn=chat)
         assert report.advice_source == "llm"
         assert report.advice == ["LLM 给出的归因与行动"]
+        assert report.advice_detail == [{"text": "LLM 给出的归因与行动", "source_type": "llm"}]
         # answers 快照与维度作答数一致，且维度有序
         assert len(report.answers) == sum(d["answered"] for d in report.dimensions)
         dims_in_order = [a["dimension"] for a in report.answers]

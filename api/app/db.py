@@ -56,6 +56,8 @@ def _migrate_report_columns() -> None:
             conn.execute(text("ALTER TABLE reports ADD COLUMN answers JSON"))
         if "advice_source" not in cols:
             conn.execute(text("ALTER TABLE reports ADD COLUMN advice_source VARCHAR(8) NOT NULL DEFAULT 'template'"))
+        if "advice_detail" not in cols:
+            conn.execute(text("ALTER TABLE reports ADD COLUMN advice_detail JSON"))
 
 
 def _migrate_session_columns() -> None:
