@@ -9,12 +9,23 @@ from pathlib import Path
 _ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
+DEFAULT_JWT_SECRET = "dev-secret-change-me"
+DEFAULT_CORS_ORIGINS = "http://localhost:5173"
+
+
+def parse_cors_origins(raw: str) -> tuple[str, ...]:
+    """逗号分隔的 CORS 白名单解析：去首尾空白、丢弃空段。"""
+    return tuple(origin.strip() for origin in raw.split(",") if origin.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     deepseek_api_key: str = ""
     base_url: str = "https://api.deepseek.com"
     model_judge: str = "deepseek-v4-pro"
     model_chat: str = "deepseek-flash"
+    jwt_secret: str = DEFAULT_JWT_SECRET
+    cors_origins: tuple[str, ...] = (DEFAULT_CORS_ORIGINS,)
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
@@ -49,5 +60,7 @@ def get_settings() -> Settings:
             base_url=pick("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             model_judge=pick("DEEPSEEK_MODEL_JUDGE", "deepseek-v4-pro"),
             model_chat=pick("DEEPSEEK_MODEL_CHAT", "deepseek-flash"),
+            jwt_secret=pick("COMPASS_JWT_SECRET", DEFAULT_JWT_SECRET),
+            cors_origins=parse_cors_origins(pick("COMPASS_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)),
         )
     return _settings

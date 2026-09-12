@@ -1,0 +1,19 @@
+services:
+  compass:
+    build: .
+    container_name: ai-compass
+    ports:
+      - "8000:8000"
+    environment:
+      # 根目录 .env（compose 自动读取）提供密钥与白名单；见 api/.env.example
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?请在仓库根目录 .env 配置 DEEPSEEK_API_KEY}
+      COMPASS_JWT_SECRET: ${COMPASS_JWT_SECRET:-dev-secret-change-me}
+      COMPASS_CORS_ORIGINS: ${COMPASS_CORS_ORIGINS:-http://localhost:5173}
+      # SQLite 落到挂卷目录，容器重建数据不丢
+      COMPASS_DB: /data/compass.db
+    volumes:
+      - compass-data:/data
+    restart: unless-stopped
+
+volumes:
+  compass-data:

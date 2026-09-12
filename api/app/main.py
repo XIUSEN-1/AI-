@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -15,8 +16,20 @@ from app.api.practice_routes import router as practice_router
 from app.api.report_routes import router as report_router
 from app.api.session_routes import router as session_router
 from app.api.teacher_routes import router as teacher_router
+from app.config import DEFAULT_JWT_SECRET, get_settings
 from app.db import SessionLocal, init_db
 from app.models import AssessmentSession
+
+logger = logging.getLogger(__name__)
+
+
+def warn_weak_jwt_secret() -> None:
+    """生产加固：JWT 签名密钥仍为默认开发值时打 WARNING（部署时以 COMPASS_JWT_SECRET 覆盖）。"""
+    if get_settings().jwt_secret == DEFAULT_JWT_SECRET:
+        logger.warning(
+            "COMPASS_JWT_SECRET 仍为默认开发密钥（%s），生产部署必须通过环境变量更换为随机长字符串！",
+            DEFAULT_JWT_SECRET,
+        )
 
 
 def _reset_stale_judging() -> None:
@@ -35,6 +48,7 @@ def _reset_stale_judging() -> None:
 async def lifespan(_: FastAPI):
     init_db()
     _reset_stale_judging()
+    warn_weak_jwt_secret()
     yield
 
 
@@ -42,7 +56,7 @@ app = FastAPI(title="AI 能力罗盘 API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=list(get_settings().cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )

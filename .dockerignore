@@ -1,0 +1,15 @@
+# 构建上下文瘦身：密钥、依赖、本地数据一律不进镜像
+.git
+.env
+.env.*
+!.env.example
+**/node_modules
+**/.venv
+**/__pycache__
+**/.pytest_cache
+*.db
+*.db-wal
+*.db-shm
+web/dist
+docs
+.worktrees

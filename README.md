@@ -39,7 +39,7 @@ ai-compass/
 cd api
 python -m venv .venv && source .venv/Scripts/activate   # Windows Git Bash
 pip install -r requirements.txt
-python -m app.seed          # 导入题库种子（90 题，幂等）
+python -m app.seed          # 导入题库种子（300 题，幂等）
 pytest                      # 运行后端全部测试
 uvicorn app.main:app --reload --port 8000   # 开发模式（后端）
 
@@ -56,6 +56,20 @@ cd ../api && source .venv/Scripts/activate
 uvicorn app.main:app --port 8000   # 打开 http://localhost:8000，API 与页面同源
 ```
 
+## 部署
+
+```bash
+# 1) 准备环境变量：复制 api/.env.example 到仓库根目录 .env，填入 DEEPSEEK_API_KEY
+#    生产环境务必同时更换 COMPASS_JWT_SECRET（保持默认值启动会打 WARNING 日志）
+cp api/.env.example .env
+
+# 2) Docker 一键构建并启动（FastAPI 单容器托管前端产物，题库种子随启动幂等导入）
+docker compose up -d --build
+# 打开 http://localhost:8000，健康检查：curl http://localhost:8000/api/health
+```
+
+公网部署（秒悟 Meoo → 阿里云函数计算）与端口/env/数据卷说明见 **docs/部署指南.md**。
+
 ## 开源使用声明
 
-本项目基于以下开源技术构建（详见 docs/开源使用声明.md）：React、Vite、Tailwind CSS、shadcn/ui、Recharts、FastAPI、SQLAlchemy、openai-python 等。
+本项目基于以下开源技术构建（详见 docs/提交材料/开源使用声明.md）：React、Vite、Tailwind CSS、shadcn/ui、Recharts、FastAPI、SQLAlchemy、httpx、PyJWT 等。
