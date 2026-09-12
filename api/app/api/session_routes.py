@@ -648,8 +648,8 @@ def _judge_all_parallel(session_id: int, tasks: list[dict], workers: int = 4) ->
 _ASYNC_JUDGING = True
 
 
-@router.post("/{session_id}/finish")
-def finish_session(session_id: int, user: dict = Depends(current_user), db: OrmSession = Depends(get_db)) -> dict:
+@router.post("/{session_id}/finish", response_model=None)  # 返回 dict（幂等）或 202 JSONResponse，跳过响应模型推导
+def finish_session(session_id: int, user: dict = Depends(current_user), db: OrmSession = Depends(get_db)) -> dict | JSONResponse:
     session = db.get(AssessmentSession, session_id)
     if session is None or session.user_id != user["id"]:
         raise HTTPException(status_code=404, detail="会话不存在")

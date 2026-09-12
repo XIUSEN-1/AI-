@@ -5,18 +5,33 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import update
 
 from app.api.auth_routes import router as auth_router
 from app.api.dialog_routes import router as dialog_router
 from app.api.practical_routes import router as practical_router
 from app.api.report_routes import router as report_router
 from app.api.session_routes import router as session_router
-from app.db import init_db
+from app.db import SessionLocal, init_db
+from app.models import AssessmentSession
+
+
+def _reset_stale_judging() -> None:
+    """服务重启时清扫陈旧 judging：判题后台线程不跨进程存活，崩溃遗留的卡死态复位为
+    in_progress（step 归零），学员可重试 finish。"""
+    with SessionLocal() as db:
+        db.execute(
+            update(AssessmentSession)
+            .where(AssessmentSession.status == "judging")
+            .values(status="in_progress", judging_step=0)
+        )
+        db.commit()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    _reset_stale_judging()
     yield
 
 

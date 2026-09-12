@@ -205,6 +205,35 @@ def test_status_endpoint_shape_and_ownership(client, auth_headers, bank):
     assert resp.status_code == 404
 
 
+# ---------- 服务重启：陈旧 judging 清扫 ----------
+
+
+def test_lifespan_resets_stale_judging(client, auth_headers):
+    """判题线程不跨进程存活：服务重启（lifespan 启动）把崩溃遗留的卡死 judging 复位为
+    in_progress 可重试；正常 in_progress 会话不受影响。"""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    stale = client.post("/api/sessions", json={"mode": "quick"}, headers=auth_headers).json()
+    fresh = client.post("/api/sessions", json={"mode": "quick"}, headers=auth_headers).json()
+    with SessionLocal() as db:  # 模拟进程崩溃遗留的卡死态
+        session = db.get(AssessmentSession, stale["session_id"])
+        session.status = "judging"
+        session.judging_step = 2
+        session.judging_total = 3
+        db.commit()
+
+    with TestClient(app) as running:  # 上下文管理器触发 lifespan startup
+        assert running.get("/api/health").status_code == 200
+
+    with SessionLocal() as db:
+        swept = db.get(AssessmentSession, stale["session_id"])
+        assert swept.status == "in_progress" and swept.judging_step == 0
+        untouched = db.get(AssessmentSession, fresh["session_id"])
+        assert untouched.status == "in_progress" and untouched.judging_step == 0
+
+
 # ---------- 跳过路径走异步管线回归 ----------
 
 
