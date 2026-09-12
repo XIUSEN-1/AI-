@@ -9,6 +9,7 @@
 """
 
 import json
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,6 +23,35 @@ from app.models import AssessmentSession, Report, ReviewQueue, SessionAnswer, Se
 from test_stage_machine import _run_objective
 
 ARTIFACT = "最终周计划：" + "本周目标是完成接口联调，分工与里程碑如下。" * 10  # ≥200 字
+
+
+class RoutedChat:
+    """按 prompt 内容路由响应并记录调用（calls 形状同 MockChat）。
+
+    实操「产物判题」与「过程量表」自 M2e 起双通道并发，两者的调用顺序不确定：
+    MockChat 按序号喂响应会串道，凡实操双通道用例一律用本替身按内容分流——
+    过程量表 system 含「指令清晰」、报告建议 system 含「学习顾问」、
+    判题按题干标记（情境题（Dx）/周计划）取分。"""
+
+    def __init__(self, judge_scores: dict[str, int] | None = None, process: str | None = None):
+        self.judge_scores = judge_scores or {}
+        self.process = _process_json() if process is None else process
+        self.calls: list[dict] = []
+        self._lock = threading.Lock()
+
+    def __call__(self, messages, **kwargs):
+        with self._lock:
+            self.calls.append({"messages": messages, **kwargs})
+        system = messages[0]["content"]
+        if "指令清晰" in system:
+            return self.process
+        if "学习顾问" in system:
+            return _ADVICE
+        text = "\n".join(m["content"] for m in messages)
+        for marker, score in self.judge_scores.items():
+            if marker in text:
+                return _good(score)
+        return _good(3)
 
 
 @pytest.fixture(autouse=True)
@@ -152,8 +182,8 @@ def test_finish_judges_all_channels_and_feeds_theta(monkeypatch, client, auth_he
         practical_prompts=["帮我拆解任务", "这个方案再改改"],
     )
     before = _snapshot(sid)
-    # mock 响应顺序 = finish 判题顺序：D3 双跑、D4 双跑、D5 产物双跑、D5 过程量表、报告建议
-    chat = MockChat([_good(3), _good(3), _good(2), _good(2), _good(4), _good(4), _process_json(), _ADVICE])
+    # 实操双通道并发 → 判题调用按内容路由：D3/D4 对话判分、D5 产物判分、过程量表、报告建议
+    chat = RoutedChat({"情境题（D3）": 3, "情境题（D4）": 2, "周计划": 4})
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
 
     resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
@@ -166,9 +196,8 @@ def test_finish_judges_all_channels_and_feeds_theta(monkeypatch, client, auth_he
     text = "\n".join(m["content"] for m in first["messages"])
     assert "我的方案一" in text and "我的方案二" in text
     assert "给出检索增强/知识库等具体方案" in text  # D3-T04 rubric 要点进入判题 prompt
-    # ---- 过程量表调用：固定 5 项 + 全部学员发言
-    process_call = chat.calls[6]
-    assert "指令清晰" in process_call["messages"][0]["content"]
+    # ---- 过程量表调用：固定 5 项 + 全部学员发言（并发下位置不定，按内容定位）
+    process_call = next(c for c in chat.calls if "指令清晰" in c["messages"][0]["content"])
     assert "任务拆解" in process_call["messages"][0]["content"]
     user_text = process_call["messages"][1]["content"]
     assert "帮我拆解任务" in user_text and "这个方案再改改" in user_text
@@ -326,7 +355,7 @@ def test_divergent_dialog_runs_enqueue_review_with_median(monkeypatch, client, a
 def test_process_failure_falls_back_to_artifact_score(monkeypatch, client, auth_headers, bank):
     sid, _ = _ready(client, auth_headers, bank, practical_prompts=["帮我拆解", "再改一版"])
     before = _snapshot(sid)
-    chat = MockChat([_good(4), _good(4), "这不是JSON", _ADVICE])
+    chat = RoutedChat({"周计划": 4}, process="这不是JSON")  # 量表输出不可解析，产物判分 4
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
 
     resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)

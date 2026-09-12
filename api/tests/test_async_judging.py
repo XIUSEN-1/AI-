@@ -103,6 +103,50 @@ def test_finish_returns_202_immediately_and_parallel_beats_serial(monkeypatch, c
     assert answers["D5-T05"].score == 3.4  # 过程 3.0×0.6 + 产物 4×0.4
 
 
+# ---------- 实操双通道（产物判题 + 过程量表）并发墙钟 ----------
+
+
+def test_practical_dual_channel_calls_run_concurrently(monkeypatch):
+    """实操题内产物判题与过程量表两个 LLM 调用须并发：各 0.4s，串行 ≥0.8s，并发墙钟 <0.6s。
+    结果组装口径不变：score = 过程×0.6 + 产物×0.4。"""
+    from app.api import session_routes
+    from app.judge.pipeline import JudgeResult
+
+    calls = []
+
+    def slow_judge(question, submission, chat_fn, **kwargs):
+        calls.append("artifact")
+        time.sleep(0.4)
+        return JudgeResult(score=4, hits=["要点"], strengths=[], gaps=[], rationale="产物判题理由")
+
+    def slow_process(chat_fn, prompts):
+        calls.append("process")
+        time.sleep(0.4)
+        return 3.0
+
+    monkeypatch.setattr(session_routes, "judge_answer", slow_judge)
+    monkeypatch.setattr(session_routes, "_judge_process_score", slow_process)
+
+    task = {
+        "question": {
+            "code": "D5-P99", "id": 999, "dimension": "D5", "difficulty": 3, "type": "practical",
+            "stem": "做一份周计划", "rubric": {"points": ["要点"], "anchors": {}},
+        },
+        "prompts": ["帮我把目标拆成每天的任务"],
+        "submission": "最终周计划：……",
+        "skipped": False,
+    }
+    start = time.perf_counter()
+    result = session_routes._judge_task(task)
+    elapsed = time.perf_counter() - start
+    assert sorted(calls) == ["artifact", "process"]
+    assert elapsed < 0.6, f"双通道墙钟 {elapsed:.2f}s 未显著低于串行 0.8s"
+    assert result["score"] == 3.4  # 过程 3.0×0.6 + 产物 4×0.4
+    assert result["echo"] == {
+        "rationale": "产物判题理由", "process_score": 3.0, "artifact_score": 4,
+    }
+
+
 # ---------- 进度轮询：step 递增至 finished ----------
 
 

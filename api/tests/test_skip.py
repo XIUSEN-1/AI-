@@ -14,7 +14,7 @@ from app.db import SessionLocal
 from app.llm.mock import MockChat
 from app.models import AssessmentSession, Report, SessionAnswer, SessionMessage
 from conftest import finish_and_wait
-from test_finish_judging import ARTIFACT, _ADVICE, _add_messages, _good, _process_json
+from test_finish_judging import ARTIFACT, RoutedChat, _ADVICE, _add_messages, _good
 from test_stage_machine import _run_objective
 
 
@@ -151,8 +151,9 @@ def test_mixed_skip_and_normal_answers(monkeypatch, client, auth_headers, bank):
     assert resp.status_code == 200
 
     before = _snapshot(sid)
-    # 判题调用顺序：D4 双跑、产物双跑、过程量表、报告建议（D3 跳过零调用）
-    chat = MockChat([_good(3), _good(3), _good(4), _good(4), _process_json(), _ADVICE])
+    # 判题调用（D3 跳过零调用）：D4 对话判分、D5 产物判分、过程量表、报告建议；
+    # 实操双通道并发 → 按内容路由响应（RoutedChat），不再按序号喂
+    chat = RoutedChat({"情境题（D4）": 3, "周计划": 4})
     monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
 
     finish_and_wait(client, auth_headers, sid)

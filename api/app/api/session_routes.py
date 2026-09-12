@@ -516,8 +516,15 @@ def _judge_task(task: dict) -> dict:
             "reason": _review_reason("对话题", result),
             "echo": {"rationale": result.rationale},
         }
-    artifact_result = judge_answer(q, task["submission"], _provider_chat)
-    process = _judge_process_score(_provider_chat, task["prompts"]) if task["prompts"] else None
+    # 双通道并发（ThreadPoolExecutor(2)）：产物判题与过程量表互不依赖，串行墙钟 = 两者之和。
+    # 线程峰值：外层判题池 4 worker ×（双通道 2 + 产物判题内层双跑 2）= 16，安全。
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        artifact_future = pool.submit(judge_answer, q, task["submission"], _provider_chat)
+        process_future = (
+            pool.submit(_judge_process_score, _provider_chat, task["prompts"]) if task["prompts"] else None
+        )
+        artifact_result = artifact_future.result()
+        process = process_future.result() if process_future is not None else None
     process_degraded = False
     notes = []
     if process is None:  # 无过程材料或量表判分失败 → 过程分按产物分折算
