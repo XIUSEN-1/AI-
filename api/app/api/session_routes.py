@@ -182,6 +182,8 @@ def _owned_session(db: OrmSession, session_id: int, user: dict) -> AssessmentSes
     session = db.get(AssessmentSession, session_id)
     if session is None or session.user_id != user["id"]:
         raise HTTPException(status_code=404, detail="会话不存在")
+    if session.status == "judging":  # finish 判题占位期：尚未结束，但不可再推进流程
+        raise HTTPException(status_code=409, detail="报告生成中，请稍候")
     if session.status != "in_progress":
         raise HTTPException(status_code=400, detail="会话已结束")
     return session
@@ -536,10 +538,17 @@ def finish_session(session_id: int, user: dict = Depends(current_user), db: OrmS
         raise HTTPException(status_code=404, detail="会话不存在")
     existing = db.scalar(select(Report).where(Report.session_id == session.id))
     if existing is not None:
-        return {"report_id": existing.id}
+        return {"report_id": existing.id}  # 幂等早返回在占位置换之前：已完成会话不再走判题
+    if session.status == "judging":
+        # 判题占位中：上一个 finish 仍在跑（客户端超时重试/并发的典型撞车窗口）
+        raise HTTPException(status_code=409, detail="报告生成中，请勿重复提交")
     if session.mode != "quick" and session.stage != "ready":
         # full 模式须完成对话式测评与实操（stage 到达实操提交后的 ready 态）方可生成报告
         raise HTTPException(status_code=400, detail="请先完成对话式测评与实操任务")
+
+    # 防重入占位：判题含多次串行 LLM 调用（数十秒），先落库 status 让并发/重试 finish 立即 409
+    session.status = "judging"
+    db.commit()
 
     def _chat(messages: list[dict], **kwargs) -> str:
         # 无 Key/上游异常时返回空串：judge_answer 解析失败走内置关键词降级，报告建议走模板回退
@@ -548,12 +557,20 @@ def finish_session(session_id: int, user: dict = Depends(current_user), db: OrmS
         except ProviderUnavailableError:
             return ""
 
-    # full 模式：先统一判题（对话/实操双通道 + θ 回灌 + 复核队列），全部判完才写报告
-    judged = _judge_subjective(db, session, _chat) if session.mode == "full" else {}
-    report = build_report(db, session, chat_fn=_chat, judged=judged)
-    session.status = "finished"
-    session.finished_at = utcnow()
-    db.add(report)
-    db.commit()
+    try:
+        # full 模式：先统一判题（对话/实操双通道 + θ 回灌 + 复核队列），全部判完才写报告
+        judged = _judge_subjective(db, session, _chat) if session.mode == "full" else {}
+        report = build_report(db, session, chat_fn=_chat, judged=judged)
+        session.status = "finished"
+        session.finished_at = utcnow()
+        db.add(report)
+        db.commit()
+    except Exception:
+        # 判题/报告异常：丢弃未提交写入（enqueue_review 逐题已提交的结果保留，重试按 asked 跳过），
+        # 回滚占位为 in_progress 保证 finish 可重试，re-raise 维持既有 500 行为
+        db.rollback()
+        session.status = "in_progress"
+        db.commit()
+        raise
     db.refresh(report)
     return {"report_id": report.id}

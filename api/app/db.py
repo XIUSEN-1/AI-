@@ -15,7 +15,8 @@ DB_PATH = os.environ.get("COMPASS_DB", str(_default_db_path()))
 
 engine = create_engine(
     f"sqlite:///{DB_PATH}",
-    connect_args={"check_same_thread": False},
+    # timeout：SQLite busy timeout（秒）——写锁被长判题事务占用时等待而非立即报 database is locked
+    connect_args={"check_same_thread": False, "timeout": 30},
 )
 
 

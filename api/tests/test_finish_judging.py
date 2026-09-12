@@ -16,7 +16,7 @@ from app.db import SessionLocal
 from app.engine.adaptive import DimensionState, update
 from app.llm.mock import MockChat
 from app.llm.provider import ProviderUnavailableError
-from app.models import AssessmentSession, ReviewQueue, SessionAnswer, SessionMessage
+from app.models import AssessmentSession, Report, ReviewQueue, SessionAnswer, SessionMessage
 from test_stage_machine import _run_objective
 
 ARTIFACT = "最终周计划：" + "本周目标是完成接口联调，分工与里程碑如下。" * 10  # ≥200 字
@@ -338,3 +338,73 @@ def test_process_failure_falls_back_to_artifact_score(monkeypatch, client, auth_
     assert answers["D5-T05"].theta_after == pytest.approx(
         update(DimensionState.from_dict(before["D5"]), 4, 1.0).theta
     )
+
+
+# ---------- finish 防重入（Task 5 加固：判题数十秒，客户端超时重试/并发撞车）----------
+
+
+def test_finish_while_judging_returns_409_without_duplicate_judging(
+    monkeypatch, client, auth_headers, bank
+):
+    """判题占位期（status=judging）的重复 finish → 409，不发起任何判题调用。"""
+    sid, _ = _ready(client, auth_headers, bank)
+    with SessionLocal() as db:  # 模拟第一个 finish 已置占位、判题仍在进行（不必真并发）
+        db.get(AssessmentSession, sid).status = "judging"
+        db.commit()
+    chat = MockChat([_ADVICE])
+    monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
+
+    resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "报告生成中，请勿重复提交"
+    assert chat.calls == []  # 不重复判题、不重复回灌 θ
+
+
+def test_progress_endpoints_reject_judging_state(client, auth_headers, bank):
+    """judging 占位期不误走进度：对话/实操端点 409、客观 answer 400。"""
+    sid, _ = _seed_dialog_and_reach_practical(client, auth_headers, bank, {})
+    with SessionLocal() as db:
+        db.get(AssessmentSession, sid).status = "judging"
+        db.commit()
+
+    resp = client.post(f"/api/sessions/{sid}/dialog/start", headers=auth_headers)
+    assert resp.status_code == 409 and "报告生成中" in resp.json()["detail"]
+    resp = client.get(f"/api/sessions/{sid}/practical/task", headers=auth_headers)
+    assert resp.status_code == 409
+    resp = client.post(
+        f"/api/sessions/{sid}/answer", json={"question_id": 1, "answer": True}, headers=auth_headers
+    )
+    assert resp.status_code == 400  # 裁定口径：answer 端点现有 status/stage 门禁已够
+
+
+def test_finish_failure_rolls_back_judging_for_retry(monkeypatch, client, auth_headers, bank):
+    """判题/报告异常 → 占位回滚 in_progress（500 行为保持）→ 重试成功；幂等早返回先于占位置换。"""
+    sid, _ = _ready(client, auth_headers, bank)
+    seen = []
+
+    class UpstreamTimeout:  # 非 ProviderUnavailableError：不被降级链承接，直接冒泡
+        def __call__(self, messages, **kwargs):
+            with SessionLocal() as db2:  # 另一连接观察判题进行中的实时占位状态
+                seen.append(db2.get(AssessmentSession, sid).status)
+            raise RuntimeError("上游 LLM 超时")
+
+    monkeypatch.setattr("app.api.session_routes.chat_completion", UpstreamTimeout())
+    with pytest.raises(RuntimeError):
+        client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
+
+    assert seen == ["judging"]  # 判题期间已占位：客户端超时重试正是撞此窗口
+    with SessionLocal() as db:
+        assert db.get(AssessmentSession, sid).status == "in_progress"  # 回滚 → 可重试
+        assert db.scalar(select(Report).where(Report.session_id == sid)) is None
+
+    chat = MockChat([_good(2), _good(2), _ADVICE])
+    monkeypatch.setattr("app.api.session_routes.chat_completion", chat)
+    resp = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
+    assert resp.status_code == 200
+    with SessionLocal() as db:
+        assert db.get(AssessmentSession, sid).status == "finished"
+
+    resp2 = client.post(f"/api/sessions/{sid}/finish", headers=auth_headers)
+    assert resp2.status_code == 200 and resp2.json()["report_id"] == resp.json()["report_id"]
+    assert len(chat.calls) == 3  # 重试 = 产物双跑 2 + 建议 1；第二次 finish 零新调用（幂等早返回）

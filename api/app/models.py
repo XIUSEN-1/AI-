@@ -58,7 +58,7 @@ class AssessmentSession(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     mode: Mapped[str] = mapped_column(String(8), default="full")  # full | quick
-    status: Mapped[str] = mapped_column(String(16), default="in_progress")  # in_progress | finished
+    status: Mapped[str] = mapped_column(String(16), default="in_progress")  # in_progress | judging | finished
     # 四阶段：客观 → 对话式 → 实操；ready 为实操已提交（T4）、finish 放行的前置态；quick 止于 objective
     stage: Mapped[str] = mapped_column(String(12), default="objective")  # objective | dialog | practical | ready
     theta_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
