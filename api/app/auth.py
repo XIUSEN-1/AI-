@@ -8,7 +8,6 @@ import time
 import jwt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.orm import Session as OrmSession
 
 JWT_SECRET = os.environ.get("COMPASS_JWT_SECRET", "dev-secret-change-me")
 JWT_TTL = 7 * 24 * 3600

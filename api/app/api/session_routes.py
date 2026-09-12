@@ -10,7 +10,8 @@ from app.auth import current_user
 from app.engine import adaptive
 from app.engine.adaptive import DIMENSIONS, DIMENSION_NAMES, DimensionState
 from app.engine.grading import grade_objective, result_from_correct
-from app.models import AssessmentSession, Question, SessionAnswer
+from app.models import AssessmentSession, Question, Report, SessionAnswer, utcnow
+from app.report.generate import build_report
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -180,3 +181,20 @@ def submit_answer(
             "theta": round(new_state.theta, 3),
         }
     }
+
+
+@router.post("/{session_id}/finish")
+def finish_session(session_id: int, user: dict = Depends(current_user), db: OrmSession = Depends(get_db)) -> dict:
+    session = db.get(AssessmentSession, session_id)
+    if session is None or session.user_id != user["id"]:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    existing = db.scalar(select(Report).where(Report.session_id == session.id))
+    if existing is not None:
+        return {"report_id": existing.id}
+    report = build_report(db, session)
+    session.status = "finished"
+    session.finished_at = utcnow()
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+    return {"report_id": report.id}
