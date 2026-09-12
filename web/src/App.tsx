@@ -4,6 +4,7 @@ import { getToken } from "@/lib/api";
 import AssessmentPage from "@/pages/AssessmentPage";
 import HomePage from "@/pages/HomePage";
 import LoginPage from "@/pages/LoginPage";
+import PracticePage from "@/pages/PracticePage";
 import ReportPage from "@/pages/ReportPage";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -17,6 +18,7 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/" element={<RequireAuth><HomePage /></RequireAuth>} />
       <Route path="/assess" element={<RequireAuth><AssessmentPage /></RequireAuth>} />
+      <Route path="/practice" element={<RequireAuth><PracticePage /></RequireAuth>} />
       <Route path="/report/:id" element={<RequireAuth><ReportPage /></RequireAuth>} />
     </Routes>
   );

@@ -31,6 +31,21 @@ interface AnswerItem {
   artifact_score?: number | null; // 实操题：产物分
 }
 
+interface AdviceCell {
+  summary?: string;
+  resources?: { title?: string; type?: string; note?: string }[];
+  exercises?: string[];
+  promotion?: string;
+}
+
+interface AdviceEntry {
+  text: string;
+  source_type: "cell" | "template" | "llm";
+  dimension?: string; // cell 条目独有：命中维度与等级
+  level?: number;
+  cell?: AdviceCell;
+}
+
 interface ReportOut {
   id: number;
   created_at: string;
@@ -41,9 +56,17 @@ interface ReportOut {
   strengths: string[];
   gaps: string[];
   advice: string[];
-  advice_source: "llm" | "template";
+  advice_source: "llm" | "cell" | "template";
+  advice_detail?: AdviceEntry[]; // 旧报告可能没有：回退按 advice 文案渲染
   answers: AnswerItem[];
 }
+
+// 建议来源三态徽章（后端 generate_llm_advice 的回退链）
+const ADVICE_SOURCE_LABEL: Record<ReportOut["advice_source"], string> = {
+  llm: "AI 生成",
+  cell: "分级建议库",
+  template: "基础模板",
+};
 
 export default function ReportPage() {
   const { id } = useParams<{ id: string }>();
@@ -62,6 +85,11 @@ export default function ReportPage() {
 
   const byDim = Object.fromEntries(report.dimensions.map((d) => [d.dimension, d]));
   const radarData = report.radar.map((r) => ({ subject: r.label, value: r.value }));
+  // 建议明细优先（cell 条目带结构化格子资源/练习任务）；旧报告无明细时按 advice 文案回退
+  const adviceEntries: AdviceEntry[] =
+    report.advice_detail && report.advice_detail.length > 0
+      ? report.advice_detail
+      : report.advice.map((text) => ({ text, source_type: report.advice_source }));
   const answerGroups = report.answers.reduce<Record<string, AnswerItem[]>>((acc, a) => {
     (acc[a.dimension] ??= []).push(a);
     return acc;
@@ -115,8 +143,8 @@ export default function ReportPage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             学习建议
-            <Badge variant={report.advice_source === "llm" ? "default" : "secondary"}>
-              {report.advice_source === "llm" ? "AI 生成" : "基础模板"}
+            <Badge variant={report.advice_source === "llm" ? "default" : report.advice_source === "cell" ? "outline" : "secondary"}>
+              {ADVICE_SOURCE_LABEL[report.advice_source]}
             </Badge>
           </CardTitle>
         </CardHeader>
@@ -124,9 +152,46 @@ export default function ReportPage() {
           <p className="text-xs text-slate-500">
             优势维度：{report.strengths.map((d) => byDim[d]?.name).filter(Boolean).join("、")}
           </p>
-          {report.advice.map((a) => (
-            <p key={a} className="rounded bg-slate-50 p-3 text-sm leading-relaxed">{a}</p>
-          ))}
+          {adviceEntries.map((e, i) =>
+            e.cell ? (
+              <div key={i} className="space-y-1.5 rounded bg-slate-50 p-3 text-sm leading-relaxed">
+                {e.dimension && (
+                  <p className="font-medium">
+                    {byDim[e.dimension]?.name ?? e.dimension}
+                    {e.level != null && <Badge variant="secondary" className="ml-2">L{e.level}</Badge>}
+                  </p>
+                )}
+                {e.cell.summary && <p>{e.cell.summary}</p>}
+                {e.cell.resources && e.cell.resources.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-slate-500">推荐资源</p>
+                    <ul className="list-disc space-y-0.5 pl-5">
+                      {e.cell.resources.map((r, j) => (
+                        <li key={j}>
+                          {r.title}
+                          {r.type && `（${r.type}）`}
+                          {r.note && ` —— ${r.note}`}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {e.cell.exercises && e.cell.exercises.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-slate-500">练习任务</p>
+                    <ol className="list-decimal space-y-0.5 pl-5">
+                      {e.cell.exercises.map((x, j) => (
+                        <li key={j}>{x}</li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+                {e.cell.promotion && <p className="text-xs text-slate-500">晋级标准：{e.cell.promotion}</p>}
+              </div>
+            ) : (
+              <p key={i} className="rounded bg-slate-50 p-3 text-sm leading-relaxed whitespace-pre-line">{e.text}</p>
+            ),
+          )}
         </CardContent>
       </Card>
 
