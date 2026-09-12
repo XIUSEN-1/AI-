@@ -6,7 +6,9 @@ from app.models import Question, SessionAnswer
 
 
 def _run_full_flow(client: TestClient, headers: dict, bank: dict, correct: bool = True) -> dict:
-    start = client.post("/api/sessions", json={"mode": "full"}, headers=headers)
+    # quick 模式：客观答完即止（M1 finish 链路）。full 模式客观完成后自 T2 起进入 dialog 阶段，
+    # 不再终止于 question==null，阶段流转由 tests/test_stage_machine.py 覆盖。
+    start = client.post("/api/sessions", json={"mode": "quick"}, headers=headers)
     assert start.status_code == 200
     view = start.json()
     guard = 0

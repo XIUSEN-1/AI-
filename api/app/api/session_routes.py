@@ -11,7 +11,7 @@ from app.engine import adaptive
 from app.engine.adaptive import DIMENSIONS, DIMENSION_NAMES, DimensionState
 from app.engine.grading import grade_objective, result_from_correct
 from app.llm.provider import chat_completion
-from app.models import AssessmentSession, Question, Report, SessionAnswer, utcnow
+from app.models import AssessmentSession, Question, Report, SessionAnswer, SessionMessage, utcnow
 from app.report.generate import build_report
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -86,28 +86,113 @@ def _done_dimensions(states: dict[str, DimensionState], ceilings: dict[str, int 
     }
 
 
+def _subjective_pool(
+    db: OrmSession, dimension: str, qtype: str, asked_codes: set[str]
+) -> list[Question]:
+    """维度内未作答的已发布主观题，难度降序、同难度按 id 升序（确定性抽题）。"""
+    return db.scalars(
+        select(Question).where(
+            Question.dimension == dimension,
+            Question.type == qtype,
+            Question.status == "published",
+            Question.code.not_in(asked_codes),
+        ).order_by(Question.difficulty.desc(), Question.id)
+    ).all()
+
+
+def _stage_plan(db: OrmSession, session: AssessmentSession) -> dict | None:
+    """主观阶段抽题（spec §6.1）。客观六维未全部完成 → None。
+
+    对话：六维按 θ 升序取第 3、4 位维度（θ 并列时按 D1..D6 稳定序）各 1 道未作答 open 题；
+    实操：固定 D5 practical；D5 为对话抽中维度时顺延下一道 D5 practical，仍无则 D2 practical。
+    """
+    states = _states(session.theta_snapshot)
+    ceilings = _difficulty_ceilings(db)
+    if _done_dimensions(states, ceilings) != set(DIMENSIONS):
+        return None
+    asked = set(
+        db.scalars(
+            select(SessionAnswer.question_code).where(SessionAnswer.session_id == session.id)
+        )
+    )
+    ordered = sorted(DIMENSIONS, key=lambda d: states[d].theta)
+    dialog_dims = ordered[2:4]
+    dialog = []
+    for d in dialog_dims:
+        pool = _subjective_pool(db, d, "open", asked)
+        if pool:
+            dialog.append(pool[0])
+    d5_pool = _subjective_pool(db, "D5", "practical", asked)
+    practical_candidates = d5_pool[1:] if "D5" in dialog_dims else d5_pool  # 冲突顺延下一道
+    if not practical_candidates:
+        practical_candidates = _subjective_pool(db, "D2", "practical", asked)[:1]  # 仍无则 D2
+    return {"dialog": dialog, "practical": practical_candidates[0] if practical_candidates else None}
+
+
+def _dialog_turns_taken(db: OrmSession, session_id: int, question_id: int) -> int:
+    """当前对话题已进行的轮次：以学员发言条数计（每轮 = 学员发言 + 考官回复）。"""
+    return len(
+        db.scalars(
+            select(SessionMessage.id).where(
+                SessionMessage.session_id == session_id,
+                SessionMessage.question_id == question_id,
+                SessionMessage.channel == "dialog",
+                SessionMessage.role == "learner",
+            )
+        ).all()
+    )
+
+
 def _session_view(db: OrmSession, session: AssessmentSession) -> dict:
     states = _states(session.theta_snapshot)
     answers = db.scalars(select(SessionAnswer).where(SessionAnswer.session_id == session.id)).all()
     asked = {a.question_code for a in answers}
     ceilings = _difficulty_ceilings(db)
     done = _done_dimensions(states, ceilings)
+
+    plan = _stage_plan(db, session)
+    if (
+        session.mode == "full"
+        and session.stage == "objective"
+        and plan is not None
+        and (plan["dialog"] or plan["practical"] is not None)
+    ):
+        # 客观全完自动进入主观阶段（quick 模式止于 objective，保持 M1 行为）
+        session.stage = "dialog" if plan["dialog"] else "practical"
+        db.add(session)
+        db.commit()
+
     question = dimension = None
-    for d in DIMENSIONS:
-        if d in done:
-            continue
-        question = _pick_question(db, d, states[d], asked)
-        if question is not None:
-            dimension = d
-            break
     reason = ""
-    if question is not None:
-        s = states[dimension]
+    if session.stage == "dialog" and plan is not None and plan["dialog"]:
+        q = plan["dialog"][0]
+        dimension = q.dimension
+        question = _question_out(q) | {"dialog_turns_taken": _dialog_turns_taken(db, session.id, q.id)}
         reason = (
-            f"你在「{DIMENSION_NAMES[dimension]}」当前估计 {s.theta:.1f} 分"
-            f"（{adaptive.LEVEL_NAMES[adaptive.dimension_level(s.theta)]}），"
-            f"本题难度 {question.difficulty}，用于校准你的水平边界"
+            f"客观测评已完成。进入对话式测评：考官将围绕「{DIMENSION_NAMES[dimension]}」情境题"
+            "结合你的回答逐步追问"
         )
+    elif session.stage == "practical" and plan is not None and plan["practical"] is not None:
+        q = plan["practical"]
+        dimension = q.dimension
+        question = _question_out(q)
+        reason = f"对话式测评完成后，请在实操任务中与 AI 真实协作完成「{DIMENSION_NAMES[dimension]}」任务并提交产物"
+    else:
+        for d in DIMENSIONS:
+            if d in done:
+                continue
+            picked = _pick_question(db, d, states[d], asked)
+            if picked is not None:
+                dimension = d
+                question = _question_out(picked)
+                break
+        if question is not None:
+            s = states[dimension]
+            reason = (
+                f"你在「{DIMENSION_NAMES[dimension]}」当前估计 {s.theta:.1f} 分"
+                f"（{adaptive.LEVEL_NAMES[adaptive.dimension_level(s.theta)]}），"
+                f"本题难度 {question['difficulty']}，用于校准你的水平边界"
+            )
     progress = {
         d: {
             "name": DIMENSION_NAMES[d],
@@ -122,7 +207,8 @@ def _session_view(db: OrmSession, session: AssessmentSession) -> dict:
     return {
         "session_id": session.id,
         "status": session.status,
-        "question": _question_out(question) if question else None,
+        "stage": session.stage,
+        "question": question,
         "next_dimension": dimension,
         "reason": reason,
         "progress": progress,
@@ -209,6 +295,9 @@ def finish_session(session_id: int, user: dict = Depends(current_user), db: OrmS
     existing = db.scalar(select(Report).where(Report.session_id == session.id))
     if existing is not None:
         return {"report_id": existing.id}
+    if session.mode != "quick" and session.stage != "ready":
+        # full 模式须完成对话式测评与实操（stage 到达实操提交后的 ready 态）方可生成报告
+        raise HTTPException(status_code=400, detail="请先完成对话式测评与实操任务")
 
     def _chat(messages: list[dict], **kwargs) -> str:
         return chat_completion(messages, **kwargs)  # model_role 等由调用方（generate_llm_advice）传入

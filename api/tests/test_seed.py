@@ -16,9 +16,12 @@ def items() -> list[dict]:
     return json.loads(FIXTURES.read_text(encoding="utf-8"))["questions"]
 
 
-def test_fixture_bank_has_18_questions(items):
-    assert len(items) == 18
+def test_fixture_bank_has_27_questions(items):
+    """18 道客观题 + 6 道开放情境题（每维 1）+ 3 道实操题（D5×2、D2×1，供 D5 冲突顺延/回落测试）。"""
+    assert len(items) == 27
     assert {q["dimension"] for q in items} == {"D1", "D2", "D3", "D4", "D5", "D6"}
+    assert sum(q["type"] == "open" for q in items) == 6
+    assert sum(q["type"] == "practical" for q in items) == 3
 
 
 @pytest.mark.parametrize(
@@ -74,10 +77,10 @@ def test_import_is_idempotent(items):
     with SessionLocal() as db:
         first = import_questions(items, db)
         second = import_questions(items, db)
-    # conftest 的 session 级 seeded_db 已先行导入，故本次 first 可能是全新导入(18)或重复导入(0)
+    # conftest 的 session 级 seeded_db 已先行导入，故本次 first 可能是全新导入(27)或重复导入(0)
     assert first["updated"] == 0
-    assert first["created"] in (0, 18)
+    assert first["created"] in (0, 27)
     assert second == {"created": 0, "updated": 0}
     with SessionLocal() as db:
         codes = db.scalars(select(Question.code)).all()
-        assert len(codes) == 18
+        assert len(codes) == 27

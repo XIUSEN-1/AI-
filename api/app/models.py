@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -59,6 +59,8 @@ class AssessmentSession(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     mode: Mapped[str] = mapped_column(String(8), default="full")  # full | quick
     status: Mapped[str] = mapped_column(String(16), default="in_progress")  # in_progress | finished
+    # 四阶段：客观 → 对话式 → 实操；ready 为实操已提交（T4）、finish 放行的前置态；quick 止于 objective
+    stage: Mapped[str] = mapped_column(String(12), default="objective")  # objective | dialog | practical | ready
     theta_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -78,6 +80,19 @@ class SessionAnswer(Base):
     time_spent: Mapped[int] = mapped_column(Integer, default=0)
     theta_after: Mapped[float] = mapped_column(Float)
     seq: Mapped[int] = mapped_column(Integer)
+
+
+class SessionMessage(Base):
+    __tablename__ = "session_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("assessment_sessions.id"))
+    question_id: Mapped[int] = mapped_column(ForeignKey("questions.id"))
+    channel: Mapped[str] = mapped_column(String(12))  # dialog | practical
+    role: Mapped[str] = mapped_column(String(12))  # learner | examiner | assistant
+    content: Mapped[str] = mapped_column(Text)  # 学员发言/考官回复/实操产物文本
+    seq: Mapped[int] = mapped_column(Integer)  # 会话内全局递增，保留完整时间线
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class Report(Base):

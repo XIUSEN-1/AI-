@@ -39,6 +39,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(engine)
     _migrate_report_columns()
+    _migrate_session_columns()
 
 
 def _migrate_report_columns() -> None:
@@ -54,3 +55,19 @@ def _migrate_report_columns() -> None:
             conn.execute(text("ALTER TABLE reports ADD COLUMN answers JSON"))
         if "advice_source" not in cols:
             conn.execute(text("ALTER TABLE reports ADD COLUMN advice_source VARCHAR(8) NOT NULL DEFAULT 'template'"))
+
+
+def _migrate_session_columns() -> None:
+    """为 M2b 前的旧库补齐 assessment_sessions.stage（幂等，新库天然跳过）。
+    session_messages 为新表，由 create_all 直接建。"""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if not insp.has_table("assessment_sessions"):
+        return
+    cols = {c["name"] for c in insp.get_columns("assessment_sessions")}
+    if "stage" not in cols:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE assessment_sessions ADD COLUMN stage VARCHAR(12) NOT NULL DEFAULT 'objective'")
+            )
