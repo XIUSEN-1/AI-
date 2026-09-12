@@ -238,6 +238,11 @@ def test_review_queue_status_filter(client, admin_headers, review_item):
     assert all(x["id"] != review_item["item_id"] for x in open_items)
     resolved = client.get("/api/admin/review-queue", params={"status": "resolved"}, headers=admin_headers).json()["items"]
     assert any(x["id"] == review_item["item_id"] and x["resolved_score"] == 3 for x in resolved)
+    all_items = client.get("/api/admin/review-queue", params={"status": "all"}, headers=admin_headers).json()["items"]
+    assert any(x["id"] == review_item["item_id"] for x in all_items)  # all=不过滤：resolved 条目也出现
+    assert (
+        client.get("/api/admin/review-queue", params={"status": "bogus"}, headers=admin_headers).status_code == 422
+    )  # status 枚举校验
 
 
 def test_resolve_updates_answer_report_and_queue(client, admin_headers, review_item):

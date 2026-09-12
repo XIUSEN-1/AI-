@@ -67,7 +67,7 @@ function stubTeacherFetch() {
     if (/^\/api\/teacher\/classes\/\d+\/analytics$/.test(url) && method === "GET") return json(ANALYTICS);
     if (url === "/api/teacher/classes" && method === "POST") {
       const body = JSON.parse(String(init?.body)) as { name: string };
-      return json({ id: 3, name: body.name, invite_code: "CFFFFFF", student_count: 0 });
+      return json({ id: 3, name: body.name, invite_code: "CFFFFFF" }); // 与后端一致：响应不含 student_count
     }
     throw new Error(`未预期的请求: ${method} ${url}`);
   });

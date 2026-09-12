@@ -174,12 +174,13 @@ def _review_item_out(db: OrmSession, item: ReviewQueue) -> dict:
 
 @router.get("/review-queue")
 def review_queue(
-    status: str | None = "open",
+    # status 筛选：open/resolved/all（all=不过滤，供前端「全部」tab）；非法值 422
+    status: str = Query("open", pattern="^(open|resolved|all)$"),
     user: dict = Depends(require_roles("teacher", "admin")),  # Global Constraints：仅 admin/teacher 可见队列
     db: OrmSession = Depends(get_db),
 ) -> dict:
     stmt = select(ReviewQueue).order_by(ReviewQueue.id)  # 先入先复核
-    if status is not None:
+    if status != "all":
         stmt = stmt.where(ReviewQueue.status == status)
     rows = db.scalars(stmt).all()
     return {"items": [_review_item_out(db, r) for r in rows], "total": len(rows)}

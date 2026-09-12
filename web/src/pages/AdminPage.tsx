@@ -217,6 +217,10 @@ function QuestionDrawer(props: {
   async function save() {
     if (saving) return;
     setFormError("");
+    if (!editing && !form.code.trim()) {
+      setFormError("编号不能为空"); // code 是题库唯一标识，前置拦截避免后端 400 才发现
+      return;
+    }
     const built = buildPayload(form);
     if ("error" in built) {
       setFormError(built.error);
@@ -676,8 +680,8 @@ function ReviewTab() {
   useEffect(() => {
     setItems(null);
     setError("");
-    const params = status === "all" ? "" : `?status=${status}`;
-    api<{ items: ReviewItem[]; total: number }>(`/api/admin/review-queue${params}`)
+    // status: open/resolved/all（all 由后端枚举支持＝不过滤；省略参数会落到后端缺省 open）
+    api<{ items: ReviewItem[]; total: number }>(`/api/admin/review-queue?status=${status}`)
       .then((out) => setItems(out.items))
       .catch((e: unknown) => setError(e instanceof Error ? e.message : "复核队列加载失败"));
   }, [status, reloadTick]);

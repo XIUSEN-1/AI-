@@ -46,9 +46,12 @@ function json(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
 }
 
-/** 有状态 fetch 替身：题库列表；复核队列首次返回 1 条 open，resolve 成功后重拉返回空 */
+/** 有状态 fetch 替身：题库列表；复核队列内存池（open/resolved/all 三种筛选，resolve 后迁移） */
 function stubAdminFetch() {
-  let resolved = false;
+  const queue: { open: Record<string, unknown>[]; resolved: Record<string, unknown>[] } = {
+    open: [{ ...REVIEW_ITEM }],
+    resolved: [{ ...REVIEW_ITEM, id: 8, status: "resolved", resolved_score: 3, reason: null }],
+  };
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -56,12 +59,20 @@ function stubAdminFetch() {
       return json({ total: 1, page: 1, page_size: 20, items: [QUESTION] });
     }
     if (url === "/api/admin/review-queue?status=open" && method === "GET") {
-      return resolved ? json({ items: [], total: 0 }) : json({ items: [REVIEW_ITEM], total: 1 });
+      return json({ items: queue.open, total: queue.open.length });
+    }
+    if (url === "/api/admin/review-queue?status=resolved" && method === "GET") {
+      return json({ items: queue.resolved, total: queue.resolved.length });
+    }
+    if (url === "/api/admin/review-queue?status=all" && method === "GET") {
+      const items = [...queue.open, ...queue.resolved];
+      return json({ items, total: items.length });
     }
     if (url === "/api/admin/review-queue/7/resolve" && method === "POST") {
       const body = JSON.parse(String(init?.body)) as { final_score: number };
       if (body.final_score !== 4) throw new Error("应提交人工终评 4 分");
-      resolved = true;
+      queue.open = [];
+      queue.resolved.push({ ...REVIEW_ITEM, status: "resolved", resolved_score: 4 });
       return json({ id: 7, status: "resolved", resolved_score: 4 });
     }
     throw new Error(`未预期的请求: ${method} ${url}`);
@@ -148,6 +159,20 @@ describe("AdminPage 冒烟", () => {
     expect(
       fetchMock.mock.calls.some(([input, init]) => String(input) === "/api/admin/review-queue/7/resolve" && init?.method === "POST"),
     ).toBe(true);
+    cleanup();
+  });
+
+  it("复核 tab「全部」：请求 status=all，同时展示待复核与已裁定条目", async () => {
+    const fetchMock = stubAdminFetch();
+    const { container, cleanup } = await renderPage(["/admin?tab=review"]);
+
+    await clickButton(container, "全部");
+    await flush();
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input) === "/api/admin/review-queue?status=all"),
+    ).toBe(true);
+    expect(container.textContent).toContain("开放题：请描述你拆解复杂任务的过程。"); // #7 待复核
+    expect(container.textContent).toContain("已裁定 3"); // #8 resolved 条目在 all 中出现
     cleanup();
   });
 

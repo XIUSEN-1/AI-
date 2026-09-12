@@ -92,7 +92,8 @@ export default function TeacherPage() {
         method: "POST",
         body: JSON.stringify({ name }),
       });
-      setClasses((prev) => [...(prev ?? []), k]);
+      // 建班响应不含 student_count（新班必为 0），补默认值避免显示 NaN
+      setClasses((prev) => [...(prev ?? []), { ...k, student_count: k.student_count ?? 0 }]);
       setClassId(k.id);
       setNewName("");
       setCreating(false);
