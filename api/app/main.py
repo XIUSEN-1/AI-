@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -10,8 +11,16 @@ from app.api.dialog_routes import router as dialog_router
 from app.api.practical_routes import router as practical_router
 from app.api.report_routes import router as report_router
 from app.api.session_routes import router as session_router
+from app.db import init_db
 
-app = FastAPI(title="AI 能力罗盘 API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="AI 能力罗盘 API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
