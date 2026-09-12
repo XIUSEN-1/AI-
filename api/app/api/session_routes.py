@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -10,7 +12,8 @@ from app.auth import current_user
 from app.engine import adaptive
 from app.engine.adaptive import DIMENSIONS, DIMENSION_NAMES, DimensionState
 from app.engine.grading import grade_objective, result_from_correct
-from app.llm.provider import chat_completion
+from app.judge.pipeline import enqueue_review, judge_answer, update_open_result
+from app.llm.provider import ProviderUnavailableError, chat_completion
 from app.models import AssessmentSession, Question, Report, SessionAnswer, SessionMessage, utcnow
 from app.report.generate import build_report
 
@@ -341,6 +344,190 @@ def submit_answer(
     }
 
 
+# ---------- finish 统一判题（spec §6.4）----------
+
+# 实操过程分固定 5 点量表：各 0-4 取均值，一次 LLM 调用输出 5 项 JSON
+PROCESS_SYSTEM_PROMPT = (
+    "你是严谨的 AI 能力测评判题官。学员在实操任务中与 AI 助手多轮协作，"
+    "请依据学员的全部发言评估其协作过程的五个方面，各给 0~4 的整数评分"
+    "（0=未体现，1=初步，2=基本，3=良好，4=优秀）：\n"
+    "clarity 指令清晰：给 AI 的指令具体、明确、可直接执行；\n"
+    "decomposition 任务拆解：把任务拆成合理的子步骤逐段推进；\n"
+    "context 上下文给料：提供必要的背景材料、约束与示例；\n"
+    "iteration 迭代甄别：对 AI 的输出追问、质疑、要求修正或核验；\n"
+    "integration 结果整合：把多轮 AI 输出整合为连贯的最终成果。\n"
+    "你只输出一个 JSON 对象，不得包含任何其他文字或代码块标记，"
+    "键固定为：clarity、decomposition、context、iteration、integration（各为 0~4 整数）。"
+)
+PROCESS_KEYS = ("clarity", "decomposition", "context", "iteration", "integration")
+
+UNANSWERED = "学员未作答"
+
+
+def _messages_contents(
+    db: OrmSession, session_id: int, question_id: int, channel: str, role: str
+) -> list[str]:
+    """该题指定渠道/角色的留痕文本，按 seq 保序（判题取材：learner=过程材料，submit=产物）。"""
+    rows = db.scalars(
+        select(SessionMessage)
+        .where(
+            SessionMessage.session_id == session_id,
+            SessionMessage.question_id == question_id,
+            SessionMessage.channel == channel,
+            SessionMessage.role == role,
+        )
+        .order_by(SessionMessage.seq)
+    ).all()
+    return [m.content for m in rows]
+
+
+def _judge_question_dict(q: Question) -> dict:
+    """judge_answer 所需的题目字段（判题 prompt 与关键词降级都要 rubric）。"""
+    return {"code": q.code, "stem": q.stem, "rubric": q.rubric}
+
+
+def _judge_process_score(chat_fn, prompts: list[str]) -> float | None:
+    """实操过程分（0~4）：固定 5 项量表单次 LLM 调用，各项裁剪到 0~4 后取均值。
+    provider 不可用（由 finish 的 provider 包装承接为空串）或输出不可解析 → None，
+    由调用方按产物分折算。"""
+    messages = [
+        {"role": "system", "content": PROCESS_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": "【学员在协作窗的全部发言（按时间顺序）】\n"
+            + "\n".join(f"{i}. {p}" for i, p in enumerate(prompts, 1)),
+        },
+    ]
+    raw = chat_fn(messages, model_role="judge", temperature=0.0, json_mode=True)
+    try:
+        data = json.loads(raw)
+        scores = []
+        for key in PROCESS_KEYS:
+            value = data.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 缺失或不是数字")
+            scores.append(min(4, max(0, int(value))))
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        return None
+    return round(sum(scores) / len(scores), 2)
+
+
+def _review_reason(kind: str, result) -> str | None:
+    """按判题结果组装入队原因；无需复核返回 None。"""
+    reasons = []
+    if result.needs_review:
+        reasons.append(f"{kind}判题三跑分差过大")
+    if result.degraded:
+        reasons.append(f"{kind}判题降级（关键词覆盖度）")
+    return "；".join(reasons) or None
+
+
+def _judge_subjective(db: OrmSession, session: AssessmentSession, chat_fn) -> dict[str, dict]:
+    """full 会话 ready 态统一判题：两道对话题整卷判分（learner 消息拼接为 submission）、
+    实操双通道（过程量表均值×0.6 + 产物 rubric 分×0.4），逐题 update_open_result 回灌 θ
+    （对话题→所属维度、实操→D5），degraded/needs_review 结果入复核队列。
+    返回 question_code → 报告回显补充信息（rationale、实操双通道分项）。
+    学员零有效发言的题不判分、不回灌 θ，score 记 0 并注明未作答。"""
+    plan = _stage_plan(db, session)
+    if plan is None:
+        return {}
+    asked = set(
+        db.scalars(
+            select(SessionAnswer.question_code).where(SessionAnswer.session_id == session.id)
+        )
+    )
+    states = _states(session.theta_snapshot)
+    judged: dict[str, dict] = {}
+    pending = [q for q in (*plan["dialog"], plan["practical"]) if q is not None and q.code not in asked]
+    for q in pending:
+        channel = "dialog" if q.type == "open" else "practical"
+        prompts = _messages_contents(db, session.id, q.id, channel, "learner")
+        artifact_contents = (
+            _messages_contents(db, session.id, q.id, "practical", "submit") if q.type == "practical" else []
+        )
+        artifact = artifact_contents[-1] if artifact_contents else None
+        submission = artifact if artifact is not None else "\n".join(prompts)
+        seq = (
+            db.scalar(
+                select(func.max(SessionAnswer.seq)).where(SessionAnswer.session_id == session.id)
+            )
+            or 0
+        ) + 1
+        if not submission:
+            db.add(
+                SessionAnswer(
+                    session_id=session.id,
+                    question_id=q.id,
+                    question_code=q.code,
+                    dimension=q.dimension,
+                    answer="",
+                    is_correct=None,
+                    score=0,
+                    theta_after=states[q.dimension].theta,
+                    seq=seq,
+                )
+            )
+            judged[q.code] = {"rationale": UNANSWERED}
+            continue
+
+        if q.type == "open":
+            result = judge_answer(_judge_question_dict(q), submission, chat_fn, learner_prompts=prompts)
+            score = float(result.score)
+            rationale = result.rationale
+            judge_raw = result.model_dump()
+            reason = _review_reason("对话题", result)
+            echo = {"rationale": rationale}
+        else:
+            artifact_result = judge_answer(_judge_question_dict(q), submission, chat_fn)
+            process = _judge_process_score(chat_fn, prompts) if prompts else None
+            process_degraded = False
+            notes = []
+            if process is None:  # 无过程材料或量表判分失败 → 过程分按产物分折算
+                process = float(artifact_result.score)
+                if prompts:
+                    process_degraded = True
+                    notes.append("过程判分不可用，过程分按产物分折算（降级）")
+                else:
+                    notes.append("协作窗无学员发言，过程分按产物分折算")
+            score = round(process * 0.6 + artifact_result.score * 0.4, 2)
+            rationale = "；".join([*notes, artifact_result.rationale])
+            judge_raw = {
+                "type": "practical",
+                "artifact": artifact_result.model_dump(),
+                "process": {"score": process, "degraded": process_degraded},
+                "score": score,
+            }
+            reason = _review_reason("实操产物", artifact_result)
+            if process_degraded:
+                reason = "；".join(filter(None, [reason, "实操过程判分降级（按产物分折算）"]))
+            echo = {
+                "rationale": rationale,
+                "process_score": process,
+                "artifact_score": artifact_result.score,
+            }
+
+        states[q.dimension] = update_open_result(states[q.dimension], q.difficulty, score)
+        answer = SessionAnswer(
+            session_id=session.id,
+            question_id=q.id,
+            question_code=q.code,
+            dimension=q.dimension,
+            answer=submission,
+            is_correct=None,
+            score=score,
+            theta_after=states[q.dimension].theta,
+            seq=seq,
+        )
+        db.add(answer)
+        db.flush()
+        if reason is not None:
+            enqueue_review(db, q.code, session.id, answer.id, judge_raw, reason)
+        judged[q.code] = echo
+    db.flush()  # 未作答行不经 enqueue_review 的 commit，须显式落库供报告回显查询
+    session.theta_snapshot = _snapshot(states)
+    return judged
+
+
 @router.post("/{session_id}/finish")
 def finish_session(session_id: int, user: dict = Depends(current_user), db: OrmSession = Depends(get_db)) -> dict:
     session = db.get(AssessmentSession, session_id)
@@ -354,10 +541,15 @@ def finish_session(session_id: int, user: dict = Depends(current_user), db: OrmS
         raise HTTPException(status_code=400, detail="请先完成对话式测评与实操任务")
 
     def _chat(messages: list[dict], **kwargs) -> str:
-        return chat_completion(messages, **kwargs)  # model_role 等由调用方（generate_llm_advice）传入
+        # 无 Key/上游异常时返回空串：judge_answer 解析失败走内置关键词降级，报告建议走模板回退
+        try:
+            return chat_completion(messages, **kwargs)  # model_role 等由调用方传入
+        except ProviderUnavailableError:
+            return ""
 
-    # 无 Key/上游异常时 provider 抛 ProviderUnavailableError，由 generate_llm_advice 捕获并回退模板
-    report = build_report(db, session, chat_fn=_chat)
+    # full 模式：先统一判题（对话/实操双通道 + θ 回灌 + 复核队列），全部判完才写报告
+    judged = _judge_subjective(db, session, _chat) if session.mode == "full" else {}
+    report = build_report(db, session, chat_fn=_chat, judged=judged)
     session.status = "finished"
     session.finished_at = utcnow()
     db.add(report)

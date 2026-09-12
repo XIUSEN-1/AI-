@@ -35,15 +35,20 @@ ADVICE_SYSTEM_PROMPT = (
 )
 
 
-def _answer_items(db: OrmSession, session: AssessmentSession) -> list[dict]:
-    """逐题回显快照：session_answers 连 questions 取题型/题干/解析，按（维度, 作答序号）排序。"""
+def _answer_items(
+    db: OrmSession, session: AssessmentSession, judged: dict[str, dict] | None = None
+) -> list[dict]:
+    """逐题回显快照：session_answers 连 questions 取题型/题干/解析，按（维度, 作答序号）排序。
+    judged 为 finish 判题结果（按 question_code 索引）：开放题/实操题补充 rationale，
+    实操题另带过程/产物双通道分项。"""
     rows = db.execute(
         select(SessionAnswer, Question).join(Question, Question.id == SessionAnswer.question_id).where(
             SessionAnswer.session_id == session.id
         )
     ).all()
-    items = [
-        {
+    items = []
+    for a, q in rows:
+        item = {
             "seq": a.seq,
             "dimension": a.dimension,
             "type": q.type,
@@ -53,8 +58,13 @@ def _answer_items(db: OrmSession, session: AssessmentSession) -> list[dict]:
             "explanation": q.explanation,
             "theta_after": round(a.theta_after, 3),
         }
-        for a, q in rows
-    ]
+        info = (judged or {}).get(a.question_code)
+        if q.type in ("open", "practical"):
+            item["rationale"] = info["rationale"] if info else "暂无判题理由"
+            if q.type == "practical" and info:
+                item["process_score"] = info.get("process_score")
+                item["artifact_score"] = info.get("artifact_score")
+        items.append(item)
     items.sort(key=lambda x: (x["dimension"], x["seq"]))
     return items
 
@@ -119,7 +129,12 @@ def generate_llm_advice(
         return fallback, "template"
 
 
-def build_report(db: OrmSession, session: AssessmentSession, chat_fn: Callable[..., str] | None = None) -> Report:
+def build_report(
+    db: OrmSession,
+    session: AssessmentSession,
+    chat_fn: Callable[..., str] | None = None,
+    judged: dict[str, dict] | None = None,
+) -> Report:
     answers = db.scalars(select(SessionAnswer).where(SessionAnswer.session_id == session.id)).all()
     dimensions = []
     for d in DIMENSIONS:
@@ -153,5 +168,5 @@ def build_report(db: OrmSession, session: AssessmentSession, chat_fn: Callable[.
         gaps=gaps,
         advice=advice,
         advice_source=advice_source,
-        answers=_answer_items(db, session),
+        answers=_answer_items(db, session, judged),
     )
