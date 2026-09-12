@@ -17,6 +17,17 @@ interface DimensionDetail {
   percent: number;
 }
 
+interface AnswerItem {
+  seq: number;
+  dimension: string;
+  type: string;
+  stem_head: string;
+  is_correct: boolean | null;
+  score: number | null;
+  explanation: string | null;
+  theta_after: number;
+}
+
 interface ReportOut {
   id: number;
   created_at: string;
@@ -27,6 +38,8 @@ interface ReportOut {
   strengths: string[];
   gaps: string[];
   advice: string[];
+  advice_source: "llm" | "template";
+  answers: AnswerItem[];
 }
 
 export default function ReportPage() {
@@ -46,6 +59,10 @@ export default function ReportPage() {
 
   const byDim = Object.fromEntries(report.dimensions.map((d) => [d.dimension, d]));
   const radarData = report.radar.map((r) => ({ subject: r.label, value: r.value }));
+  const answerGroups = report.answers.reduce<Record<string, AnswerItem[]>>((acc, a) => {
+    (acc[a.dimension] ??= []).push(a);
+    return acc;
+  }, {});
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-4">
@@ -93,7 +110,12 @@ export default function ReportPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">学习建议</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-base">
+            学习建议
+            <Badge variant={report.advice_source === "llm" ? "default" : "secondary"}>
+              {report.advice_source === "llm" ? "AI 生成" : "基础模板"}
+            </Badge>
+          </CardTitle>
         </CardHeader>
         <CardContent className="space-y-2">
           <p className="text-xs text-slate-500">
@@ -104,6 +126,46 @@ export default function ReportPage() {
           ))}
         </CardContent>
       </Card>
+
+      {report.answers.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">逐题回显</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {Object.entries(answerGroups).map(([dim, items]) => (
+              <details key={dim} className="rounded-lg border" open={report.gaps.includes(dim)}>
+                <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium">
+                  {byDim[dim]?.name ?? dim}
+                  <span className="ml-2 text-xs font-normal text-slate-500">
+                    答对 {items.filter((a) => a.is_correct).length}/{items.length}
+                  </span>
+                </summary>
+                <div className="space-y-2 border-t px-3 py-2">
+                  {items.map((a) => (
+                    <div key={`${a.dimension}-${a.seq}`} className="rounded bg-slate-50 p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="text-sm">第 {a.seq} 题 · {a.stem_head}</p>
+                        {a.is_correct === null ? (
+                          <Badge variant="secondary">得分 {a.score ?? "-"}/4</Badge>
+                        ) : (
+                          <Badge variant={a.is_correct ? "default" : "destructive"}>
+                            {a.is_correct ? "答对" : "答错"}
+                          </Badge>
+                        )}
+                      </div>
+                      {a.explanation && (
+                        <p className="mt-1 text-xs leading-relaxed text-slate-500">解析：{a.explanation}</p>
+                      )}
+                      <p className="mt-1 text-xs text-slate-400">作答后能力值 {a.theta_after.toFixed(3)}</p>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            ))}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

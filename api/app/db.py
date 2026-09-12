@@ -38,3 +38,19 @@ def init_db() -> None:
     from app import models  # noqa: F401  确保模型完成注册
 
     Base.metadata.create_all(engine)
+    _migrate_report_columns()
+
+
+def _migrate_report_columns() -> None:
+    """create_all 不做列级迁移：为 M2a 前的旧库补齐 reports 新增列（幂等，新库天然跳过）。"""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if not insp.has_table("reports"):
+        return
+    cols = {c["name"] for c in insp.get_columns("reports")}
+    with engine.begin() as conn:
+        if "answers" not in cols:
+            conn.execute(text("ALTER TABLE reports ADD COLUMN answers JSON"))
+        if "advice_source" not in cols:
+            conn.execute(text("ALTER TABLE reports ADD COLUMN advice_source VARCHAR(8) NOT NULL DEFAULT 'template'"))

@@ -10,6 +10,7 @@ from app.auth import current_user
 from app.engine import adaptive
 from app.engine.adaptive import DIMENSIONS, DIMENSION_NAMES, DimensionState
 from app.engine.grading import grade_objective, result_from_correct
+from app.llm.provider import chat_completion
 from app.models import AssessmentSession, Question, Report, SessionAnswer, utcnow
 from app.report.generate import build_report
 
@@ -208,7 +209,12 @@ def finish_session(session_id: int, user: dict = Depends(current_user), db: OrmS
     existing = db.scalar(select(Report).where(Report.session_id == session.id))
     if existing is not None:
         return {"report_id": existing.id}
-    report = build_report(db, session)
+
+    def _chat(messages: list[dict], **kwargs) -> str:
+        return chat_completion(messages, **kwargs)  # model_role 等由调用方（generate_llm_advice）传入
+
+    # 无 Key/上游异常时 provider 抛 ProviderUnavailableError，由 generate_llm_advice 捕获并回退模板
+    report = build_report(db, session, chat_fn=_chat)
     session.status = "finished"
     session.finished_at = utcnow()
     db.add(report)

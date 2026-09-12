@@ -44,4 +44,6 @@ def get_report(report_id: int, user: dict = Depends(current_user), db: OrmSessio
         "strengths": report.strengths,
         "gaps": report.gaps,
         "advice": report.advice,
+        "advice_source": report.advice_source,
+        "answers": report.answers or [],
     }

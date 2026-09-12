@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+from typing import Callable
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
 from app.engine.adaptive import DIMENSIONS, DIMENSION_NAMES, LEVEL_NAMES, dimension_level
-from app.models import AssessmentSession, Report, SessionAnswer
+from app.models import AssessmentSession, Question, Report, SessionAnswer
 
 ADVICE_LOW = {
     "D1": "系统学习 AI 基础概念：推荐吴恩达《AI for Everyone》入门，重点掌握大模型的能力边界与幻觉成因。",
@@ -24,8 +27,98 @@ ADVICE_HIGH = {
     "D6": "成为负责任使用的示范者：在团队内推动 AI 使用规范（隐私脱敏、内容标注、合规审查），帮助他人识别风险。",
 }
 
+ADVICE_SYSTEM_PROMPT = (
+    "你是 AI 能力测评的学习顾问。请根据学员六维能力数据，针对短板维度输出 1~3 条个性化中文学习建议，"
+    "每条须包含：短板归因（结合分数与作答情况说明为什么弱）与可执行行动（具体的练习步骤、方法或资源）。"
+    "你只输出一个 JSON 对象，不得包含任何其他文字或代码块标记，键固定为："
+    "advice（1~3 条建议组成的字符串数组）。"
+)
 
-def build_report(db: OrmSession, session: AssessmentSession) -> Report:
+
+def _answer_items(db: OrmSession, session: AssessmentSession) -> list[dict]:
+    """逐题回显快照：session_answers 连 questions 取题型/题干/解析，按（维度, 作答序号）排序。"""
+    rows = db.execute(
+        select(SessionAnswer, Question).join(Question, Question.id == SessionAnswer.question_id).where(
+            SessionAnswer.session_id == session.id
+        )
+    ).all()
+    items = [
+        {
+            "seq": a.seq,
+            "dimension": a.dimension,
+            "type": q.type,
+            "stem_head": q.stem[:60],
+            "is_correct": a.is_correct,
+            "score": a.score,
+            "explanation": q.explanation,
+            "theta_after": round(a.theta_after, 3),
+        }
+        for a, q in rows
+    ]
+    items.sort(key=lambda x: (x["dimension"], x["seq"]))
+    return items
+
+
+def _template_advice(dimensions: list[dict], gaps: list[str]) -> list[str]:
+    by_dim = {x["dimension"]: x for x in dimensions}
+    return [
+        f"「{by_dim[d]['name']}」当前 {by_dim[d]['level_name']}："
+        + (ADVICE_LOW[d] if by_dim[d]["level"] <= 2 else ADVICE_HIGH[d])
+        for d in sorted(gaps)
+    ]
+
+
+def _advice_messages(dimensions: list[dict], gaps: list[str]) -> list[dict]:
+    overview = "；".join(
+        f"{x['name']}（{x['dimension']}）能力值 {x['theta']:.2f}、{x['level_name']}、答对 {x['correct']}/{x['answered']}"
+        for x in dimensions
+    )
+    by_dim = {x["dimension"]: x for x in dimensions}
+    gap_detail = "；".join(
+        f"{by_dim[d]['name']}（{by_dim[d]['dimension']}）：能力值 {by_dim[d]['theta']:.2f}"
+        f"（{by_dim[d]['level_name']}），答对 {by_dim[d]['correct']}/{by_dim[d]['answered']}"
+        for d in sorted(gaps)
+    )
+    user = (
+        f"【六维能力概览】{overview}\n"
+        f"【短板维度明细】{gap_detail}\n"
+        "请针对以上短板维度给出 1~3 条学习建议。"
+    )
+    return [
+        {"role": "system", "content": ADVICE_SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
+
+
+def _parse_advice(raw: str) -> list[str]:
+    data = json.loads(raw)
+    if not isinstance(data, dict) or not isinstance(data.get("advice"), list):
+        raise ValueError("advice 缺失或不是列表")
+    advice = [s.strip() for s in data["advice"] if isinstance(s, str) and s.strip()]
+    if not advice:
+        raise ValueError("advice 为空")
+    return advice[:3]
+
+
+def generate_llm_advice(
+    dimensions: list[dict],
+    gaps: list[str],
+    chat_fn: Callable[..., str] | None = None,
+) -> tuple[list[str], str]:
+    """生成学习建议：chat_fn 可用且输出合法 → (LLM 建议, "llm")；
+    chat_fn 为 None、调用抛错（如无 Key）或输出不可解析/为空 → (模板建议, "template")。
+    """
+    fallback = _template_advice(dimensions, gaps)
+    if chat_fn is None:
+        return fallback, "template"
+    try:
+        raw = chat_fn(_advice_messages(dimensions, gaps), model_role="judge", temperature=0.0, json_mode=True)
+        return _parse_advice(raw), "llm"
+    except Exception:  # 回退边界：任何 provider/解析失败都不得阻断报告生成
+        return fallback, "template"
+
+
+def build_report(db: OrmSession, session: AssessmentSession, chat_fn: Callable[..., str] | None = None) -> Report:
     answers = db.scalars(select(SessionAnswer).where(SessionAnswer.session_id == session.id)).all()
     dimensions = []
     for d in DIMENSIONS:
@@ -48,12 +141,7 @@ def build_report(db: OrmSession, session: AssessmentSession) -> Report:
     total_level = dimension_level(total_theta)
     ranked = sorted(dimensions, key=lambda x: x["theta"], reverse=True)
     gaps = [x["dimension"] for x in ranked[-2:]]
-    by_dim = {x["dimension"]: x for x in dimensions}
-    advice = [
-        f"「{by_dim[d]['name']}」当前 {by_dim[d]['level_name']}："
-        + (ADVICE_LOW[d] if by_dim[d]["level"] <= 2 else ADVICE_HIGH[d])
-        for d in sorted(gaps)
-    ]
+    advice, advice_source = generate_llm_advice(dimensions, gaps, chat_fn)
     return Report(
         session_id=session.id,
         user_id=session.user_id,
@@ -63,4 +151,6 @@ def build_report(db: OrmSession, session: AssessmentSession) -> Report:
         strengths=[x["dimension"] for x in ranked[:2]],
         gaps=gaps,
         advice=advice,
+        advice_source=advice_source,
+        answers=_answer_items(db, session),
     )

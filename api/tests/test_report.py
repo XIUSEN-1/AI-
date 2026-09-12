@@ -1,5 +1,14 @@
+import json
+
 from fastapi.testclient import TestClient
 
+from app.db import SessionLocal
+from app.engine.adaptive import DIMENSIONS, DIMENSION_NAMES
+from app.llm.mock import MockChat
+from app.llm.provider import ProviderUnavailableError
+from app.models import AssessmentSession
+from app.report import generate
+from app.report.generate import ADVICE_HIGH, ADVICE_LOW, build_report
 from tests.test_session_flow import _run_full_flow
 
 
@@ -45,3 +54,129 @@ def test_report_forbidden_for_others(client, auth_headers, bank):
     other = client.post("/api/auth/student", json={"name": "他人", "student_no": "OTHER01"}).json()
     resp = client.get(f"/api/reports/{report_id}", headers={"Authorization": f"Bearer {other['token']}"})
     assert resp.status_code == 403
+
+
+def _dims() -> list[dict]:
+    """构造 build_report 内产的六维明细（D1/D6 弱，其余强）。"""
+    weak = {"D1", "D6"}
+    return [
+        {
+            "dimension": d,
+            "name": DIMENSION_NAMES[d],
+            "theta": 2.0 if d in weak else 4.0,
+            "level": 1 if d in weak else 4,
+            "level_name": "入门" if d in weak else "熟练",
+            "answered": 3,
+            "correct": 1 if d in weak else 3,
+            "percent": 25 if d in weak else 75,
+        }
+        for d in DIMENSIONS
+    ]
+
+
+def _template_for(dims: list[dict], gaps: list[str]) -> list[str]:
+    by_dim = {x["dimension"]: x for x in dims}
+    return [
+        f"「{by_dim[d]['name']}」当前 {by_dim[d]['level_name']}："
+        + (ADVICE_LOW[d] if by_dim[d]["level"] <= 2 else ADVICE_HIGH[d])
+        for d in sorted(gaps)
+    ]
+
+
+def test_llm_advice_success_marks_llm_source():
+    chat = MockChat([json.dumps({"advice": ["建议一：D1 归因+行动", "建议二：D6 归因+行动"]}, ensure_ascii=False)])
+    advice, source = generate.generate_llm_advice(_dims(), ["D1", "D6"], chat)
+    assert source == "llm"
+    assert advice == ["建议一：D1 归因+行动", "建议二：D6 归因+行动"]
+    # prompt 必须带六维分数与短板维度明细，且走低温 JSON 模式
+    assert len(chat.calls) == 1
+    assert chat.calls[0]["model_role"] == "judge"
+    assert chat.calls[0]["temperature"] == 0.0
+    assert chat.calls[0]["json_mode"] is True
+    text = "\n".join(m["content"] for m in chat.calls[0]["messages"])
+    for d in DIMENSIONS:
+        assert DIMENSION_NAMES[d] in text
+    assert "2.0" in text  # 短板维度分数进入 prompt
+
+
+def test_llm_advice_caps_at_three_items():
+    chat = MockChat([json.dumps({"advice": ["一", "二", "三", "四", "五"]}, ensure_ascii=False)])
+    advice, source = generate.generate_llm_advice(_dims(), ["D1"], chat)
+    assert source == "llm"
+    assert advice == ["一", "二", "三"]
+
+
+def test_llm_advice_falls_back_on_provider_error():
+    def boom(messages, **kwargs):
+        raise ProviderUnavailableError("缺少 DEEPSEEK_API_KEY，无法调用 LLM")
+
+    dims, gaps = _dims(), ["D1", "D6"]
+    advice, source = generate.generate_llm_advice(dims, gaps, boom)
+    assert source == "template"
+    assert advice == _template_for(dims, gaps)
+
+
+def test_llm_advice_falls_back_on_bad_payload():
+    bad_outputs = ["这不是JSON", json.dumps({"advice": []}), json.dumps({"advice": "一条"}), json.dumps([1, 2]), ""]
+    dims, gaps = _dims(), ["D1", "D6"]
+    for raw in bad_outputs:
+        advice, source = generate.generate_llm_advice(dims, gaps, MockChat([raw]))
+        assert source == "template"
+        assert advice == _template_for(dims, gaps)
+
+
+def test_llm_advice_none_chat_fn_uses_template():
+    dims, gaps = _dims(), ["D1", "D6"]
+    advice, source = generate.generate_llm_advice(dims, gaps, None)
+    assert source == "template"
+    assert advice == _template_for(dims, gaps)
+
+
+def test_finish_report_answers_shape_and_order(client, auth_headers, bank):
+    report_id = _finish_a_session(client, auth_headers, bank)
+    body = client.get(f"/api/reports/{report_id}", headers=auth_headers).json()
+    # 测试环境无 DEEPSEEK_API_KEY → provider 抛错被吞，报告标记模板来源
+    assert body["advice_source"] == "template"
+    answers = body["answers"]
+    assert len(answers) == sum(d["answered"] for d in body["dimensions"])
+    keys = {"seq", "dimension", "type", "stem_head", "is_correct", "score", "explanation", "theta_after"}
+    assert all(keys <= set(a) for a in answers)
+    assert all(a["stem_head"] and len(a["stem_head"]) <= 60 for a in answers)
+    assert all(a["is_correct"] in (True, False) for a in answers)  # 客观题回显对错
+    assert all(a["explanation"] for a in answers)  # fixture 客观题全部带解析
+    assert all(a["type"] in ("single", "multi", "judge") for a in answers)
+    order = [(a["dimension"], a["seq"]) for a in answers]
+    assert order == sorted(order)  # 先按维度再按作答序号
+
+
+def test_build_report_with_mock_llm_marks_llm(client, auth_headers, bank):
+    view = _run_full_flow(client, auth_headers, bank, correct=True)
+    with SessionLocal() as db:
+        session = db.get(AssessmentSession, view["session_id"])
+        chat = MockChat([json.dumps({"advice": ["LLM 给出的归因与行动"]}, ensure_ascii=False)])
+        report = build_report(db, session, chat_fn=chat)
+        assert report.advice_source == "llm"
+        assert report.advice == ["LLM 给出的归因与行动"]
+        # answers 快照与维度作答数一致，且维度有序
+        assert len(report.answers) == sum(d["answered"] for d in report.dimensions)
+        dims_in_order = [a["dimension"] for a in report.answers]
+        assert dims_in_order == sorted(dims_in_order)
+        assert all(a["is_correct"] is True for a in report.answers)
+
+
+def test_finish_endpoint_wires_provider_chat_fn(client, auth_headers, bank, monkeypatch):
+    """finish 端点的 provider 包装必须真正把 LLM 结果带回报告——
+    防 kwargs 透传错误（如重复传 model_role）被回退边界吞掉、静默永远走模板。"""
+    from app.api import session_routes
+
+    def fake_chat_completion(messages, *, model_role, temperature=0.0, json_mode=False, timeout=60):
+        assert model_role == "judge"
+        assert json_mode is True
+        return json.dumps({"advice": ["端点级 LLM 建议"]}, ensure_ascii=False)
+
+    monkeypatch.setattr(session_routes, "chat_completion", fake_chat_completion)
+    view = _run_full_flow(client, auth_headers, bank, correct=True)
+    resp = client.post(f"/api/sessions/{view['session_id']}/finish", headers=auth_headers)
+    body = client.get(f"/api/reports/{resp.json()['report_id']}", headers=auth_headers).json()
+    assert body["advice_source"] == "llm"
+    assert body["advice"] == ["端点级 LLM 建议"]
