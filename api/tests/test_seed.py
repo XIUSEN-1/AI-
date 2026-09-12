@@ -40,8 +40,10 @@ def test_import_is_idempotent(items):
     with SessionLocal() as db:
         first = import_questions(items, db)
         second = import_questions(items, db)
-    assert first["created"] == 12 and first["updated"] == 0
-    assert second["created"] == 0 and second["updated"] == 0
+    # conftest 的 session 级 seeded_db 已先行导入，故本次 first 可能是全新导入(12)或重复导入(0)
+    assert first["updated"] == 0
+    assert first["created"] in (0, 12)
+    assert second == {"created": 0, "updated": 0}
     with SessionLocal() as db:
         codes = db.scalars(select(Question.code)).all()
         assert len(codes) == 12
