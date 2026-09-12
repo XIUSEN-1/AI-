@@ -23,6 +23,10 @@ OBJECTIVE_TYPES = ("single", "multi", "judge")
 
 # 对话题结束标记（dialog/finish-question 落库的考官结束语，同时作为切题依据）
 DIALOG_CLOSING = "本题作答结束。"
+# 学员主动跳过标记：与 DIALOG_CLOSING 同样使 _dialog_closed 判定闭题（复用切题/阶段翻转），
+# finish 判题时据此区分"学员跳过"（score=None，不回灌 θ）与"学员未作答"（记 0 分）
+DIALOG_SKIPPED = "学员跳过本题。"
+PRACTICAL_SKIPPED = "学员跳过实操任务。"
 
 
 class StartIn(BaseModel):
@@ -150,7 +154,7 @@ def _dialog_turns_taken(db: OrmSession, session_id: int, question_id: int) -> in
 
 
 def _dialog_closed(db: OrmSession, session_id: int, question: Question) -> bool:
-    """对话题是否已结束：学员发言满 3 轮，或考官已落结束标记（学员提前完成/跳过）。"""
+    """对话题是否已结束：学员发言满 3 轮，或考官已落结束/跳过标记（学员提前完成/跳过）。"""
     if _dialog_turns_taken(db, session_id, question.id) >= 3:
         return True
     return (
@@ -160,7 +164,7 @@ def _dialog_closed(db: OrmSession, session_id: int, question: Question) -> bool:
                 SessionMessage.question_id == question.id,
                 SessionMessage.channel == "dialog",
                 SessionMessage.role == "examiner",
-                SessionMessage.content == DIALOG_CLOSING,
+                SessionMessage.content.in_((DIALOG_CLOSING, DIALOG_SKIPPED)),
             )
         )
         is not None
@@ -364,6 +368,7 @@ PROCESS_SYSTEM_PROMPT = (
 PROCESS_KEYS = ("clarity", "decomposition", "context", "iteration", "integration")
 
 UNANSWERED = "学员未作答"
+SKIPPED = "学员跳过"
 
 
 def _messages_contents(
@@ -381,6 +386,22 @@ def _messages_contents(
         .order_by(SessionMessage.seq)
     ).all()
     return [m.content for m in rows]
+
+
+def _skip_marked(db: OrmSession, session_id: int, question_id: int, channel: str) -> bool:
+    """该题是否落有学员跳过标记（对话=DIALOG_SKIPPED，实操=PRACTICAL_SKIPPED）。"""
+    return (
+        db.scalar(
+            select(SessionMessage.id).where(
+                SessionMessage.session_id == session_id,
+                SessionMessage.question_id == question_id,
+                SessionMessage.channel == channel,
+                SessionMessage.role == "examiner",
+                SessionMessage.content.in_((DIALOG_SKIPPED, PRACTICAL_SKIPPED)),
+            )
+        )
+        is not None
+    )
 
 
 def _judge_question_dict(q: Question) -> dict:
@@ -429,7 +450,8 @@ def _judge_subjective(db: OrmSession, session: AssessmentSession, chat_fn) -> di
     实操双通道（过程量表均值×0.6 + 产物 rubric 分×0.4），逐题 update_open_result 回灌 θ
     （对话题→所属维度、实操→D5），degraded/needs_review 结果入复核队列。
     返回 question_code → 报告回显补充信息（rationale、实操双通道分项）。
-    学员零有效发言的题不判分、不回灌 θ，score 记 0 并注明未作答。"""
+    学员零有效发言的题不判分、不回灌 θ：有跳过标记记 score=None 并注明"学员跳过"，
+    否则 score 记 0 并注明未作答。"""
     plan = _stage_plan(db, session)
     if plan is None:
         return {}
@@ -455,6 +477,26 @@ def _judge_subjective(db: OrmSession, session: AssessmentSession, chat_fn) -> di
             )
             or 0
         ) + 1
+        if _skip_marked(db, session.id, q.id, channel) and (
+            not prompts if q.type == "open" else artifact is None
+        ):
+            # 学员主动跳过（无有效发言/产物）：不判分、不回灌 θ、不作负向评价
+            db.add(
+                SessionAnswer(
+                    session_id=session.id,
+                    question_id=q.id,
+                    question_code=q.code,
+                    dimension=q.dimension,
+                    answer="",
+                    is_correct=None,
+                    score=None,
+                    theta_after=states[q.dimension].theta,
+                    seq=seq,
+                )
+            )
+            db.flush()  # 跳过行同样即时落库：后续题的 max(seq) 查询才能看到，避免重号
+            judged[q.code] = {"rationale": SKIPPED}
+            continue
         if not submission:
             db.add(
                 SessionAnswer(

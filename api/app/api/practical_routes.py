@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from app.api.auth_routes import get_db
 from app.api.session_routes import (
+    PRACTICAL_SKIPPED,
     _maybe_advance_stage,
     _next_seq,
     _owned_session,
@@ -182,3 +183,26 @@ def practical_submit(
     db.add(session)
     db.commit()
     return {"submitted": True, "stage": "ready"}
+
+
+@router.post("/{session_id}/practical/skip")
+def practical_skip(
+    session_id: int, user: dict = Depends(current_user), db: OrmSession = Depends(get_db)
+) -> dict:
+    """学员主动跳过实操任务：落跳过标记（无产物行），直接置 ready 供 finish 放行。"""
+    session = _owned_session(db, session_id, user)
+    q = _require_practical(db, session)
+    db.add(
+        SessionMessage(  # examiner 角色落跳过标记：finish 见此标记且无 submit 行 → 跳过语义
+            session_id=session.id,
+            question_id=q.id,
+            channel="practical",
+            role="examiner",
+            content=PRACTICAL_SKIPPED,
+            seq=_next_seq(db, session.id),
+        )
+    )
+    session.stage = "ready"
+    db.add(session)
+    db.commit()
+    return {"skipped": True, "stage": "ready"}

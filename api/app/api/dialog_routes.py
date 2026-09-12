@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session as OrmSession
 from app.api.auth_routes import get_db
 from app.api.session_routes import (
     DIALOG_CLOSING,
+    DIALOG_SKIPPED,
     _dialog_closed,
     _dialog_turns_taken,
     _maybe_advance_stage,
@@ -226,6 +227,28 @@ def dialog_finish_question(
             channel="dialog",
             role="examiner",
             content=DIALOG_CLOSING,
+            seq=_next_seq(db, session.id),
+        )
+    )
+    db.commit()
+    db.refresh(session)
+    return _session_view(db, session)
+
+
+@router.post("/{session_id}/dialog/skip")
+def dialog_skip(
+    session_id: int, user: dict = Depends(current_user), db: OrmSession = Depends(get_db)
+) -> dict:
+    """学员主动跳过当前对话题：落跳过标记（判定闭题），复用既有切题/阶段翻转逻辑。"""
+    session = _owned_session(db, session_id, user)
+    q = _require_dialog(db, session)
+    db.add(
+        SessionMessage(
+            session_id=session.id,
+            question_id=q.id,
+            channel="dialog",
+            role="examiner",
+            content=DIALOG_SKIPPED,
             seq=_next_seq(db, session.id),
         )
     )
