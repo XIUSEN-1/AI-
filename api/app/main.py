@@ -71,6 +71,11 @@ app.include_router(teacher_router)
 app.include_router(admin_router)
 
 
+@app.post("/api/debug/postcheck")
+def post_check(payload: dict) -> dict:
+    return {"ok": True, "got": payload}
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "app": "ai-compass"}
