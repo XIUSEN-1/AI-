@@ -17,10 +17,26 @@
 
 ## 技术栈
 
-- **前端**：React 19 + TypeScript + Vite + Tailwind CSS + shadcn/ui + Recharts
-- **后端**：Python FastAPI + SQLite (WAL) + SQLAlchemy 2.0
-- **大模型**：DeepSeek（OpenAI 兼容接入，provider 可切换），用于对话式测评、LLM 判题与报告生成
-- **部署**：单容器（FastAPI 托管前端静态产物），秒悟 Meoo → 阿里云
+- **前端**：React 19 + TypeScript + Vite + Tailwind CSS v4 + shadcn/ui + Recharts
+- **后端**：Python 3.13 FastAPI + SQLite (WAL) + SQLAlchemy 2.0 + PyJWT
+- **大模型**：DeepSeek（OpenAI 兼容接入，provider 可切换）——判题 `deepseek-v4-pro`（双跑一致性，Kappa 0.983）/ 对话与建议 `deepseek-flash`
+- **测试**：pytest 268 项（零真实 LLM 调用）+ vitest 27 项 + tsc 构建门禁
+- **部署**：单容器（FastAPI 托管前端静态产物），Docker Compose / 秒悟 Meoo 镜像部署
+
+详细选型理由与模块划分见 **[docs/技术栈说明.md](docs/技术栈说明.md)**。
+
+## 功能速览
+
+- **四阶段测评**：自适应客观题（动态难度、能力轨迹可视化）→ 对话式测评（AI 考官三档追问、SSE 流式）→ 实操任务（内置真实 AI 协作窗 + 产物提交）→ 异步并行智能判题（实时进度）
+- **报告**：六维雷达、L1~L5 等级、逐题回显（含 AI 评分理由）、AI 生成个性化学习建议（分级建议库 30 格融合）、成长趋势折线、导出 PNG
+- **跳过与续答**：对话/实操可跳过（如实标注）；中途退出可断线续答
+- **教师端**：建班发邀请码、班级六维看板、共性短板 TOP3、学员成长曲线、CSV 导出
+- **管理端**：题库 CRUD（1000 题）、AI 判分人工复核队列、教师账号管理
+- **错题本与练习**：按考点汇总错题，一键生成薄弱练习卷（即时判分，不计入正式等级）
+
+## 使用说明
+
+三种角色的完整操作手册见 **[docs/使用说明.md](docs/使用说明.md)**。内置账号：管理员 `admin / admin123`（生产环境务必修改）。
 
 ## 目录结构
 
