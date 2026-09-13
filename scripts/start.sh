@@ -19,5 +19,5 @@ except Exception:
     out["traceback"] = traceback.format_exc()
 open("/tmp/orm_diag.txt", "w").write(repr(out))
 PY
-python /tmp/orm_diag.py || true
+PYTHONPATH=/code/api python /tmp/orm_diag.py || true
 exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-9000}"
