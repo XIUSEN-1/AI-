@@ -76,6 +76,15 @@ def health() -> dict:
     return {"status": "ok", "app": "ai-compass"}
 
 
+@app.get("/api/debug/diag")
+def debug_diag() -> dict:
+    """临时诊断：读取容器内 ORM 诊断文件。"""
+    from pathlib import Path as P
+
+    f = P("/tmp/orm_diag.txt")
+    return {"diag": f.read_text(encoding="utf-8") if f.exists() else "missing"}
+
+
 @app.get("/api/debug/db")
 def debug_db() -> dict:
     """临时诊断端点（验证后移除）：返回数据库路径/可写性/计数。"""
