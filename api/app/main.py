@@ -90,6 +90,42 @@ from pydantic import BaseModel as _BM
 class _EchoIn(_BM):
     x: int = 1
 
+@app.get("/api/debug/steps")
+def debug_steps() -> dict:
+    """逐步执行注册内部操作，定位 500 的确切环节。"""
+    import traceback
+
+    out = {}
+    steps = []
+    def _step(name, fn):
+        try:
+            steps.append({name: fn()})
+        except Exception:
+            steps.append({name: "EXC: " + traceback.format_exc()[-400:]})
+
+    from app.api.auth_routes import StudentRegisterIn
+    _step("pydantic", lambda: StudentRegisterIn(name="t", student_no="STEP01").model_dump())
+    from app.auth import hash_password
+    _step("hash", lambda: hash_password("x")[:10])
+    from app.auth import make_token
+    _step("jwt", lambda: make_token(999, "student")[:20])
+    from app.api.auth_routes import get_db
+    from sqlalchemy import select
+    from app.models import User
+    def _orm_insert():
+        db = next(get_db())
+        try:
+            u = User(name="step", student_no="STEP" + str(len(steps)) + str(id(steps) % 1000), role="student")
+            db.add(u)
+            db.commit()
+            return f"inserted id={u.id}"
+        finally:
+            db.close()
+    _step("orm_insert", _orm_insert)
+    out["steps"] = steps
+    return out
+
+
 @app.get("/api/debug/orm")
 def debug_orm() -> dict:
     """走与注册完全相同的 get_db 依赖链。"""
