@@ -165,6 +165,25 @@ async def echo(body: _EchoIn):
     return {"received": body.x}
 
 
+@app.get("/api/debug/echo2")
+def echo2():
+    return {"via": "main-direct"}
+
+
+@app.post("/api/debug/stu")
+def stu(body: StudentRegisterIn) -> dict:
+    """与注册端点完全相同的 body 模型 + Depends(get_db)，但在 main.py。"""
+    from sqlalchemy import select
+    from app.models import User
+
+    rows = db_dep().execute(select(User.id)).all()
+    return {"ok": True, "name": body.name, "users": len(rows)}
+
+
+def db_dep():
+    return next(get_db())
+
+
 @app.get("/api/health")
 def debug_env() -> dict:
     """临时诊断（验证后移除）：环境快照。"""
