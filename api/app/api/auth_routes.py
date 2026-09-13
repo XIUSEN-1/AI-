@@ -57,6 +57,10 @@ def _student_register_impl(body: StudentRegisterIn, db: OrmSession) -> dict:
         if klass is None:
             raise HTTPException(status_code=400, detail="邀请码无效")
         class_id = klass.id
+    if body.student_no in ("admin",) or db.scalar(
+        select(User).where(User.student_no == body.student_no, User.role != "student")
+    ):
+        raise HTTPException(status_code=400, detail="该学号已被管理账号占用，请更换学号")
     user = db.scalar(select(User).where(User.student_no == body.student_no))
     if user is None:
         user = User(name=body.name, student_no=body.student_no, role="student", class_id=class_id)
