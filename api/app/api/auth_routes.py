@@ -12,6 +12,11 @@ from app.models import Klass, User
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+@router.get("/version")
+def _version() -> dict:
+    return {"build": "v18-diag", "has_impl": "_student_register_impl" in globals()}
+
+
 def get_db():
     db = SessionLocal()
     try:
