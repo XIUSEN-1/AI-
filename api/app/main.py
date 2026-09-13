@@ -6,10 +6,11 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import update
+from pydantic import BaseModel
+from sqlalchemy import select, update
 
 from app.api.admin_routes import router as admin_router
-from app.api.auth_routes import router as auth_router
+from app.api.auth_routes import get_db, router as auth_router
 from app.api.dialog_routes import router as dialog_router
 from app.api.practical_routes import router as practical_router
 from app.api.practice_routes import router as practice_router
@@ -18,7 +19,7 @@ from app.api.session_routes import router as session_router
 from app.api.teacher_routes import router as teacher_router
 from app.config import DEFAULT_JWT_SECRET, get_settings
 from app.db import SessionLocal, init_db
-from app.models import AssessmentSession
+from app.models import AssessmentSession, User
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +74,7 @@ app.include_router(admin_router)
 
 @app.post("/api/debug/login-dep")
 def login_dep(payload: dict, db=Depends(get_db)) -> dict:
-    """POST + pydantic + Depends 三要素齐备（main.py 直挂）。"""
-    from sqlalchemy import select
-    from app.models import User
-
+    """诊断对照：POST + pydantic dict + Depends(get_db) 三要素（main.py 直挂）。"""
     rows = db.execute(select(User.id)).all()
     return {"ok": True, "users": len(rows), "got": payload}
 
@@ -84,6 +82,11 @@ def login_dep(payload: dict, db=Depends(get_db)) -> dict:
 @app.post("/api/debug/postcheck")
 def post_check(payload: dict) -> dict:
     return {"ok": True, "got": payload}
+
+
+@app.get("/api/auth/version")
+def auth_version() -> dict:
+    return {"build": "v24-clean"}
 
 
 @app.get("/api/health")
