@@ -160,6 +160,16 @@ def debug_orm() -> dict:
         db.close()
 
 
+from fastapi import APIRouter
+
+_diag = APIRouter(prefix="/api/auth")
+
+@_diag.get("/v2check")
+def _v2check() -> dict:
+    return {"v2": True}
+
+app.include_router(_diag)
+
 @app.post("/api/echo")
 async def echo(body: _EchoIn):
     return {"received": body.x}
