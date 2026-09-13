@@ -76,6 +76,31 @@ def health() -> dict:
     return {"status": "ok", "app": "ai-compass"}
 
 
+@app.get("/api/debug/db")
+def debug_db() -> dict:
+    """临时诊断端点（验证后移除）：返回数据库路径/可写性/计数。"""
+    import os
+    import sqlite3
+
+    from app.db import DB_PATH
+    info = {"db_path": DB_PATH, "cwd": os.getcwd(), "tmp_writable": os.access("/tmp", os.W_OK)}
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        info["users"] = conn.execute("select count(*) from users").fetchone()[0]
+        info["questions"] = conn.execute("select count(*) from questions").fetchone()[0]
+        conn.execute("create table if not exists _diag(x int)")
+        conn.execute("insert into _diag values (1)")
+        conn.commit()
+        conn.execute("delete from _diag")
+        conn.commit()
+        info["writable"] = True
+        conn.close()
+    except Exception as e:
+        info["writable"] = False
+        info["error"] = f"{type(e).__name__}: {e}"
+    return info
+
+
 _DIST = Path(__file__).resolve().parent.parent.parent / "web" / "dist"
 
 
