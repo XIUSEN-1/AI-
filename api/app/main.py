@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -10,6 +10,7 @@ from sqlalchemy import update
 
 from app.api.admin_routes import router as admin_router
 from app.api.auth_routes import router as auth_router
+from app.api.auth_routes import get_db
 from app.api.dialog_routes import router as dialog_router
 from app.api.practical_routes import router as practical_router
 from app.api.practice_routes import router as practice_router
@@ -89,6 +90,20 @@ from pydantic import BaseModel as _BM
 
 class _EchoIn(_BM):
     x: int = 1
+
+@app.get("/api/debug/dep")
+def debug_dep(db=Depends(get_db)) -> dict:
+    from sqlalchemy import select
+    from app.models import User
+
+    try:
+        rows = db.execute(select(User.id)).all()
+        return {"via_depends": True, "users": len(rows)}
+    except Exception:
+        import traceback
+
+        return {"via_depends": False, "tb": traceback.format_exc()[-500:]}
+
 
 @app.get("/api/debug/steps")
 def debug_steps() -> dict:
