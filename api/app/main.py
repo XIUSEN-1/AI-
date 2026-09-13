@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -69,6 +69,16 @@ app.include_router(report_router)
 app.include_router(practice_router)
 app.include_router(teacher_router)
 app.include_router(admin_router)
+
+
+@app.post("/api/debug/login-dep")
+def login_dep(payload: dict, db=Depends(get_db)) -> dict:
+    """POST + pydantic + Depends 三要素齐备（main.py 直挂）。"""
+    from sqlalchemy import select
+    from app.models import User
+
+    rows = db.execute(select(User.id)).all()
+    return {"ok": True, "users": len(rows), "got": payload}
 
 
 @app.post("/api/debug/postcheck")
