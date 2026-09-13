@@ -1,32 +1,13 @@
 #!/bin/sh
+# Meoo 镜像部署启动脚本：绑定 0.0.0.0:${PORT:-9000}
+# 注意：平台 sh 为 dash，禁用 heredoc；诊断逻辑已移除
 set -e
 cd /code/api
-export COMPASS_DB="${COMPASS_DB:-/tmp/compass.db}"
-python -m app.seed
-cat > /tmp/orm_diag.py << 'PY'
-import json
-import traceback
 
-out = {}
-try:
-    from fastapi.testclient import TestClient
-    from app.main import app
-    c = TestClient(app)
-    for path, payload in [
-        ("/api/health", None),
-        ("/api/auth/me", None),
-        ("/api/auth/login", {"username": "admin", "password": "admin123"}),
-        ("/api/auth/student", {"name": "diag", "student_no": "DIAG01"}),
-    ]:
-        try:
-            r = c.post(path, json=payload) if payload else c.get(path)
-            out[path] = {"status": r.status_code, "body": r.text[:300]}
-        except Exception:
-            out[path] = {"exc": traceback.format_exc()[-600:]}
-except Exception:
-    out["setup"] = traceback.format_exc()[-600:]
-open("/tmp/orm_diag.txt", "w").write(json.dumps(out, ensure_ascii=False, indent=1))
-PY
-PY
-PYTHONPATH=/code/api python /tmp/orm_diag.py || true
+# FC 容器工作目录只读：数据库放可写的 /tmp（Meoo 无持久化，实例生命周期内有效）
+export COMPASS_DB="${COMPASS_DB:-/tmp/compass.db}"
+
+# 首次启动自动建表/迁移并导入 1000 题种子（幂等）
+python -m app.seed
+
 exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-9000}"

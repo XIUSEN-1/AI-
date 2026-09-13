@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
@@ -40,21 +39,15 @@ def student_register(body: StudentRegisterIn, db: OrmSession = Depends(get_db)) 
         if klass is None:
             raise HTTPException(status_code=400, detail="邀请码无效")
         class_id = klass.id
-    import traceback
-    try:
-        user = db.scalar(select(User).where(User.student_no == body.student_no))
-        if user is None:
-            user = User(name=body.name, student_no=body.student_no, role="student", class_id=class_id)
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-        elif user.role != "student":
-            raise HTTPException(status_code=400, detail="该学号不是学员账号，请使用账号密码登录")
-        return {"token": make_token(user.id, user.role), "user": {"id": user.id, "name": user.name, "role": user.role}}
-    except HTTPException:
-        raise
-    except Exception:
-        return JSONResponse(status_code=500, content={"traceback": traceback.format_exc()})
+    user = db.scalar(select(User).where(User.student_no == body.student_no))
+    if user is None:
+        user = User(name=body.name, student_no=body.student_no, role="student", class_id=class_id)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif user.role != "student":
+        raise HTTPException(status_code=400, detail="该学号不是学员账号，请使用账号密码登录")
+    return {"token": make_token(user.id, user.role), "user": {"id": user.id, "name": user.name, "role": user.role}}
 
 
 @router.post("/login")
