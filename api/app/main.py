@@ -85,10 +85,14 @@ app.include_router(admin_router)
 
 
 
+from pydantic import BaseModel as _BM
+
+class _EchoIn(_BM):
+    x: int = 1
+
 @app.post("/api/echo")
-async def echo(request):
-    body = await request.body()
-    return {"len": len(body), "head": body[:80].decode("utf-8", "ignore")}
+async def echo(body: _EchoIn):
+    return {"received": body.x}
 
 
 @app.get("/api/health")
