@@ -54,6 +54,19 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="AI 能力罗盘 API", version="0.1.0", lifespan=lifespan)
 
+@app.middleware("http")
+async def traceback_middleware(request, call_next):
+    """临时诊断（验证后移除）：全局异常可见化。"""
+    try:
+        return await call_next(request)
+    except Exception:
+        import traceback
+
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse(traceback.format_exc(), status_code=500)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(get_settings().cors_origins),
