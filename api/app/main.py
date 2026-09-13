@@ -84,7 +84,14 @@ app.include_router(teacher_router)
 app.include_router(admin_router)
 
 
-@app.get("/api/debug/env")
+
+@app.post("/api/echo")
+async def echo(request):
+    body = await request.body()
+    return {"len": len(body), "head": body[:80].decode("utf-8", "ignore")}
+
+
+@app.get("/api/health")
 def debug_env() -> dict:
     """临时诊断（验证后移除）：环境快照。"""
     import os
