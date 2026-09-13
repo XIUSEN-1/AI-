@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -10,7 +10,6 @@ from sqlalchemy import update
 
 from app.api.admin_routes import router as admin_router
 from app.api.auth_routes import router as auth_router
-from app.api.auth_routes import get_db, StudentRegisterIn
 from app.api.dialog_routes import router as dialog_router
 from app.api.practical_routes import router as practical_router
 from app.api.practice_routes import router as practice_router
@@ -55,19 +54,6 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="AI 能力罗盘 API", version="0.1.0", lifespan=lifespan)
 
-@app.middleware("http")
-async def traceback_middleware(request, call_next):
-    """临时诊断（验证后移除）：全局异常可见化。"""
-    try:
-        return await call_next(request)
-    except Exception:
-        import traceback
-
-        from fastapi.responses import PlainTextResponse
-
-        return PlainTextResponse(traceback.format_exc(), status_code=500)
-
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(get_settings().cors_origins),
@@ -85,143 +71,9 @@ app.include_router(teacher_router)
 app.include_router(admin_router)
 
 
-
-from pydantic import BaseModel as _BM
-
-class _EchoIn(_BM):
-    x: int = 1
-
-@app.get("/api/debug/dep")
-def debug_dep(db=Depends(get_db)) -> dict:
-    from sqlalchemy import select
-    from app.models import User
-
-    try:
-        rows = db.execute(select(User.id)).all()
-        return {"via_depends": True, "users": len(rows)}
-    except Exception:
-        import traceback
-
-        return {"via_depends": False, "tb": traceback.format_exc()[-500:]}
-
-
-@app.get("/api/debug/steps")
-def debug_steps() -> dict:
-    """逐步执行注册内部操作，定位 500 的确切环节。"""
-    import traceback
-
-    out = {}
-    steps = []
-    def _step(name, fn):
-        try:
-            steps.append({name: fn()})
-        except Exception:
-            steps.append({name: "EXC: " + traceback.format_exc()[-400:]})
-
-    from app.api.auth_routes import StudentRegisterIn
-    _step("pydantic", lambda: StudentRegisterIn(name="t", student_no="STEP01").model_dump())
-    from app.auth import hash_password
-    _step("hash", lambda: hash_password("x")[:10])
-    from app.auth import make_token
-    _step("jwt", lambda: make_token(999, "student")[:20])
-    from app.api.auth_routes import get_db, StudentRegisterIn
-    from sqlalchemy import select
-    from app.models import User
-    def _orm_insert():
-        db = next(get_db())
-        try:
-            u = User(name="step", student_no="STEP" + str(len(steps)) + str(id(steps) % 1000), role="student")
-            db.add(u)
-            db.commit()
-            return f"inserted id={u.id}"
-        finally:
-            db.close()
-    _step("orm_insert", _orm_insert)
-    out["steps"] = steps
-    return out
-
-
-@app.get("/api/debug/orm")
-def debug_orm() -> dict:
-    """走与注册完全相同的 get_db 依赖链。"""
-    import traceback
-
-    from app.api.auth_routes import get_db, StudentRegisterIn
-    from sqlalchemy import select
-    from app.models import User
-
-    db = next(get_db())
-    try:
-        rows = db.execute(select(User.id)).all()
-        return {"ok": True, "users": len(rows)}
-    except Exception:
-        return {"ok": False, "tb": traceback.format_exc()[-800:]}
-    finally:
-        db.close()
-
-
-from fastapi import APIRouter
-
-_diag = APIRouter(prefix="/api/auth")
-
-@_diag.get("/v2check")
-def _v2check() -> dict:
-    return {"v2": True}
-
-app.include_router(_diag)
-
-@app.post("/api/echo")
-async def echo(body: _EchoIn):
-    return {"received": body.x}
-
-
-@app.get("/api/debug/echo2")
-def echo2():
-    return {"via": "main-direct"}
-
-
-@app.post("/api/debug/stu")
-def stu(body: StudentRegisterIn) -> dict:
-    """与注册端点完全相同的 body 模型 + Depends(get_db)，但在 main.py。"""
-    from sqlalchemy import select
-    from app.models import User
-
-    try:
-        rows = db_dep().execute(select(User.id)).all()
-        return {"ok": True, "name": body.name, "users": len(rows)}
-    except Exception:
-        import traceback
-
-        from fastapi.responses import PlainTextResponse
-
-        return PlainTextResponse(traceback.format_exc(), status_code=500)
-
-
-def db_dep():
-    return next(get_db())
-
-
-@app.get("/api/health")
-def debug_env() -> dict:
-    """临时诊断（验证后移除）：环境快照。"""
-    import os
-    import sys
-
-    return {
-        "python": sys.version,
-        "cwd": os.getcwd(),
-        "compass_db": os.environ.get("COMPASS_DB", "<unset>"),
-        "port": os.environ.get("PORT", "<unset>"),
-        "jwt": os.environ.get("COMPASS_JWT_SECRET", "<unset>")[:8],
-        "writable_tmp": os.access("/tmp", os.W_OK),
-        "writable_cwd": os.access(os.getcwd(), os.W_OK),
-    }
-
-
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "app": "ai-compass"}
-
 
 
 _DIST = Path(__file__).resolve().parent.parent.parent / "web" / "dist"
