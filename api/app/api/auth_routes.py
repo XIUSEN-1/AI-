@@ -33,6 +33,19 @@ class PasswordLoginIn(BaseModel):
 
 @router.post("/student")
 def student_register(body: StudentRegisterIn, db: OrmSession = Depends(get_db)) -> dict:
+    try:
+        return _student_register_impl(body, db)
+    except HTTPException:
+        raise
+    except Exception:
+        import traceback
+
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=500, content={"tb": traceback.format_exc()})
+
+
+def _student_register_impl(body: StudentRegisterIn, db: OrmSession) -> dict:
     class_id = None
     if body.invite_code:
         klass = db.scalar(select(Klass).where(Klass.invite_code == body.invite_code))
