@@ -71,6 +71,23 @@ app.include_router(teacher_router)
 app.include_router(admin_router)
 
 
+@app.get("/api/debug/env")
+def debug_env() -> dict:
+    """临时诊断（验证后移除）：环境快照。"""
+    import os
+    import sys
+
+    return {
+        "python": sys.version,
+        "cwd": os.getcwd(),
+        "compass_db": os.environ.get("COMPASS_DB", "<unset>"),
+        "port": os.environ.get("PORT", "<unset>"),
+        "jwt": os.environ.get("COMPASS_JWT_SECRET", "<unset>")[:8],
+        "writable_tmp": os.access("/tmp", os.W_OK),
+        "writable_cwd": os.access(os.getcwd(), os.W_OK),
+    }
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "app": "ai-compass"}
