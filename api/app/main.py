@@ -90,6 +90,25 @@ from pydantic import BaseModel as _BM
 class _EchoIn(_BM):
     x: int = 1
 
+@app.get("/api/debug/orm")
+def debug_orm() -> dict:
+    """走与注册完全相同的 get_db 依赖链。"""
+    import traceback
+
+    from app.api.auth_routes import get_db
+    from sqlalchemy import select
+    from app.models import User
+
+    db = next(get_db())
+    try:
+        rows = db.execute(select(User.id)).all()
+        return {"ok": True, "users": len(rows)}
+    except Exception:
+        return {"ok": False, "tb": traceback.format_exc()[-800:]}
+    finally:
+        db.close()
+
+
 @app.post("/api/echo")
 async def echo(body: _EchoIn):
     return {"received": body.x}
