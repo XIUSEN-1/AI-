@@ -10,7 +10,7 @@ from sqlalchemy import update
 
 from app.api.admin_routes import router as admin_router
 from app.api.auth_routes import router as auth_router
-from app.api.auth_routes import get_db
+from app.api.auth_routes import get_db, StudentRegisterIn
 from app.api.dialog_routes import router as dialog_router
 from app.api.practical_routes import router as practical_router
 from app.api.practice_routes import router as practice_router
@@ -124,7 +124,7 @@ def debug_steps() -> dict:
     _step("hash", lambda: hash_password("x")[:10])
     from app.auth import make_token
     _step("jwt", lambda: make_token(999, "student")[:20])
-    from app.api.auth_routes import get_db
+    from app.api.auth_routes import get_db, StudentRegisterIn
     from sqlalchemy import select
     from app.models import User
     def _orm_insert():
@@ -146,7 +146,7 @@ def debug_orm() -> dict:
     """走与注册完全相同的 get_db 依赖链。"""
     import traceback
 
-    from app.api.auth_routes import get_db
+    from app.api.auth_routes import get_db, StudentRegisterIn
     from sqlalchemy import select
     from app.models import User
 
@@ -176,8 +176,15 @@ def stu(body: StudentRegisterIn) -> dict:
     from sqlalchemy import select
     from app.models import User
 
-    rows = db_dep().execute(select(User.id)).all()
-    return {"ok": True, "name": body.name, "users": len(rows)}
+    try:
+        rows = db_dep().execute(select(User.id)).all()
+        return {"ok": True, "name": body.name, "users": len(rows)}
+    except Exception:
+        import traceback
+
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse(traceback.format_exc(), status_code=500)
 
 
 def db_dep():
